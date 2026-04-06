@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Law's Room - Spatialgineers MVP</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #050505; color: #fff; font-family: monospace; }
+        #canvas-container { position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 1; }
+        #video-feed { position: absolute; top: 10px; right: 10px; width: 240px; height: 180px; transform: scaleX(-1); border: 1px solid #333; z-index: 2; border-radius: 8px; opacity: 0.7; }
+        #ui-layer { position: absolute; top: 20px; left: 20px; z-index: 3; pointer-events: none; }
+        .hud-text { font-size: 14px; text-transform: uppercase; letter-spacing: 2px; text-shadow: 0 0 5px rgba(0, 255, 255, 0.8); color: #0ff; margin-bottom: 5px; }
+        .hud-warning { color: #f0f; text-shadow: 0 0 5px rgba(255, 0, 255, 0.8); }
+        #loader { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 24px; z-index: 10; color: #0ff; text-transform: uppercase; letter-spacing: 4px; }
+    </style>
+    <!-- Three.js Pipeline -->
+    <script async src="https://unpkg.com/es-module-shims@1.6.3/dist/es-module-shims.js"></script>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.150.1/build/three.module.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.150.1/examples/jsm/"
+        }
+      }
+    </script>
+    <!-- MediaPipe Tasks Vision -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/vision_bundle.js" crossorigin="anonymous"></script>
+</head>
+<body>
+    <div id="loader">INICIALIZANDO SISTEMA ESPACIAL...</div>
+    <div id="ui-layer">
+        <div class="hud-text">ROOM: <span id="status-room">INACTIVO</span></div>
+        <div class="hud-text">SHAMBLES PLANE: <span id="status-plane">OFFLINE</span></div>
+        <div class="hud-text hud-warning" id="status-gesture">ESPERANDO INPUT BIOMÉTRICO</div>
+    </div>
+    <video id="video-feed" autoplay playsinline></video>
+    <div id="canvas-container"></div>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+        // ==========================================
+        // ARQUITECTURA CORE (Variables Globales)
+        // ==========================================
+        let scene, camera, renderer, controls;
+        let video, handLandmarker, lastVideoTime = -1;
+        let targetObject, theRoom;
+        
+        // El plano matemático que cortará el objeto
+        const cuttingPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+        const planeHelper = new THREE.PlaneHelper(cuttingPlane, 2, 0x00ffff);
+        
+        // Variables de interpolación (Anti-Jittering)
+        const targetPlaneNormal = new THREE.Vector3(0, 1, 0);
+        let targetPlaneConstant = 0;
+        const LERP_FACTOR = 0.15; // Ajusta esto para velocidad vs suavidad
+
+        // ==========================================
+        // FASE 1: INICIALIZACIÓN THREE.JS
+        // ==========================================
+        function initThree() {
+            const container = document.getElementById('canvas-container');
+            
+            scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(0x050505, 0.02);
+
+            camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 100);
+            camera.position.set(0, 2, 8);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            // VITAL PARA EL EFECTO:
+            renderer.localClippingEnabled = true; 
+            container.appendChild(renderer.domElement);
+
+            // Setup de Luces
+            const ambientLight = new THREE.AmbientLight(0x404040);
+            scene.add(ambientLight);
+            const dirLight = new THREE.DirectionalLight(0xffffff, 1);
+            dirLight.position.set(5, 10, 5);
+            scene.add(dirLight);
+            const blueLight = new THREE.PointLight(0x00ffff, 2, 10);
+            blueLight.position.set(0, 0, 0);
+            scene.add(blueLight);
+
+            controls = new OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+
+            buildAssets();
+            
+            window.addEventListener('resize', onWindowResize);
+        }
+
+        function buildAssets() {
+            // 1. EL OBJETO A CORTAR (Geometría compleja para ver bien el corte)
+            const geometry = new THREE.TorusKnotGeometry(1, 0.3, 100, 16);
+            
+            // Material externo
+            const materialOuter = new THREE.MeshStandardMaterial({
+                color: 0x444444,
+                roughness: 0.2,
+                metalness: 0.8,
+                clippingPlanes: [cuttingPlane],
+                clipShadows: true,
+                side: THREE.FrontSide
+            });
+
+            // Material interno (Emisivo para simular energía al cortar)
+            const materialInner = new THREE.MeshStandardMaterial({
+                color: 0x00ffff,
+                emissive: 0x00ffff,
+                emissiveIntensity: 0.5,
+                clippingPlanes: [cuttingPlane],
+                clipShadows: true,
+                side: THREE.BackSide // Solo se ve por dentro
+            });
+
+            targetObject = new THREE.Group();
+            targetObject.add(new THREE.Mesh(geometry, materialOuter));
+            targetObject.add(new THREE.Mesh(geometry, materialInner));
+            scene.add(targetObject);
+
+            // 2. EL ROOM (Esfera de Law)
+            const roomGeo = new THREE.SphereGeometry(3, 32, 32);
+            const roomMat = new THREE.MeshBasicMaterial({
+                color: 0x00ffff,
+                wireframe: true,
+                transparent: true,
+                opacity: 0.05
+            });
+            theRoom = new THREE.Mesh(roomGeo, roomMat);
+            theRoom.scale.set(0.01, 0.01, 0.01); // Inicia invisible
+            scene.add(theRoom);
+
+            // Helper del plano (Oculto por defecto)
+            planeHelper.visible = false;
+            scene.add(planeHelper);
+        }
+
+        // ==========================================
+        // FASE 2: INICIALIZACIÓN MEDIAPIPE (VISION AI)
+        // ==========================================
+        async function initMediaPipe() {
+            const vision = await FilesetResolver.forVisionTasks(
+                "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm"
+            );
+            
+            handLandmarker = await HandLandmarker.createFromOptions(vision, {
+                baseOptions: {
+                    modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+                    delegate: "GPU"
+                },
+                runningMode: "VIDEO",
+                numHands: 1, // Restringido a 1 mano para el PoC
+                minHandDetectionConfidence: 0.7,
+                minHandPresenceConfidence: 0.7,
+                minTrackingConfidence: 0.7
+            });
+
+            startCamera();
+        }
+
+        async function startCamera() {
+            video = document.getElementById('video-feed');
+            const constraints = { video: { width: 640, height: 480 } };
+            
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia(constraints);
+                video.srcObject = stream;
+                video.addEventListener('loadeddata', () => {
+                    document.getElementById('loader').style.display = 'none';
+                    animate(); // Inicia el Loop Principal
+                });
+            } catch (err) {
+                console.error("Error accediendo a la cámara:", err);
+                document.getElementById('loader').innerText = "ERROR DE CÁMARA";
+            }
+        }
+
+        // ==========================================
+        // FASE 3: LÓGICA ESPACIAL Y MATEMÁTICA
+        // ==========================================
+        
+        // Mapea coordenadas 2D de MediaPipe (0-1) al espacio 3D de Three.js
+        function getSpatialVector(landmark) {
+            // MediaPipe es origen arriba-izquierda. ThreeJS es centro.
+            // Restamos landmark.x de 1 porque la cámara está en espejo
+            const x = (1 - landmark.x) * 2 - 1; 
+            const y = -(landmark.y) * 2 + 1;
+            
+            // Mapeo Z empírico basado en el propiocepcion del modelo
+            const z = -landmark.z * 5; 
+            
+            // Proyección desde la cámara hacia la escena
+            const vector = new THREE.Vector3(x, y, 0.5);
+            vector.unproject(camera);
+            
+            const dir = vector.sub(camera.position).normalize();
+            // Profundidad simulada (distancia focal). Ajustar según scale.
+            const distance = 4 + z; 
+            
+            return camera.position.clone().add(dir.multiplyScalar(distance));
+        }
+
+        function processHandGestures(landmarks) {
+            // Índices clave: 0(Muñeca), 5(Indice base), 9(Medio base), 17(Meñique base)
+            const wrist = getSpatialVector(landmarks[0]);
+            const indexBase = getSpatialVector(landmarks[5]);
+            const pinkyBase = getSpatialVector(landmarks[17]);
+            
+            const thumbTip = getSpatialVector(landmarks[4]);
+            const indexTip = getSpatialVector(landmarks[8]);
+
+            // 1. GESTURE: ROOM (Pinch / Expansión)
+            const pinchDistance = thumbTip.distanceTo(indexTip);
+            if (pinchDistance > 1.5) { // Mano abierta
+                theRoom.scale.lerp(new THREE.Vector3(1, 1, 1), 0.1);
+                document.getElementById('status-room').innerText = "ACTIVO";
+                document.getElementById('status-room').style.color = "#0ff";
+            } else { // Mano cerrada
+                theRoom.scale.lerp(new THREE.Vector3(0.01, 0.01, 0.01), 0.2);
+                document.getElementById('status-room').innerText = "COLAPSADO";
+                document.getElementById('status-room').style.color = "#555";
+            }
+
+            // 2. GESTURE: CORTE (Shambles Plane)
+            // Calculamos la normal de la palma usando Producto Cruz
+            const vectorA = new THREE.Vector3().subVectors(indexBase, wrist);
+            const vectorB = new THREE.Vector3().subVectors(pinkyBase, wrist);
+            const palmNormal = new THREE.Vector3().crossVectors(vectorA, vectorB).normalize();
+            
+            // Invertimos la normal si estamos usando la mano derecha (por el espejo de la cámara)
+            palmNormal.negate(); 
+
+            // Actualizamos targets para el LERP (Centro de masa en el nudillo medio)
+            const middleBase = getSpatialVector(landmarks[9]);
+            targetPlaneNormal.copy(palmNormal);
+            
+            // El 'constant' del plano es la distancia al origen a lo largo de la normal
+            // Ecuación del plano: N.dot(P) = d
+            targetPlaneConstant = targetPlaneNormal.dot(middleBase);
+
+            planeHelper.visible = true;
+            document.getElementById('status-plane').innerText = "TRACKING";
+            document.getElementById('status-gesture').innerText = "SISTEMA ENGANCHADO";
+            document.getElementById('status-gesture').style.color = "#0f0";
+        }
+
+        // ==========================================
+        // LOOP PRINCIPAL
+        // ==========================================
+        function animate() {
+            requestAnimationFrame(animate);
+
+            // 1. INFERENCIA VISION AI
+            if (video.currentTime !== lastVideoTime) {
+                lastVideoTime = video.currentTime;
+                const results = handLandmarker.detectForVideo(video, performance.now());
+                
+                if (results.landmarks && results.landmarks.length > 0) {
+                    processHandGestures(results.landmarks[0]);
+                } else {
+                    planeHelper.visible = false;
+                    document.getElementById('status-plane').innerText = "OFFLINE";
+                    document.getElementById('status-gesture').innerText = "BUSCANDO FIRMA...";
+                    document.getElementById('status-gesture').style.color = "#f0f";
+                }
+            }
+
+            // 2. INTERPOLACIÓN SUAVE DEL PLANO (LERP)
+            // Esto elimina el temblor natural de la mano/cámara
+            cuttingPlane.normal.lerp(targetPlaneNormal, LERP_FACTOR).normalize();
+            cuttingPlane.constant += (targetPlaneConstant - cuttingPlane.constant) * LERP_FACTOR;
+
+            // 3. ANIMACIÓN PASIVA
+            targetObject.rotation.y += 0.005;
+            targetObject.rotation.x += 0.002;
+            theRoom.rotation.y -= 0.01;
+
+            controls.update();
+            renderer.render(scene, camera);
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        // Boot system
+        initThree();
+        initMediaPipe();
+
+    </script>
+</body>
+</html>
