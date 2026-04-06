@@ -1,279 +1,631 @@
 <!DOCTYPE html>
 <html lang="es">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Law's Room - Spatialgineers Core</title>
-    <style>
-        body { margin: 0; overflow: hidden; background-color: #020202; color: #0ff; font-family: 'Courier New', Courier, monospace; user-select: none; }
-        #canvas-container { position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 1; }
-        
-        /* UI y HUD */
-        #ui-layer { position: absolute; top: 20px; left: 20px; z-index: 10; pointer-events: none; text-shadow: 0 0 5px #0ff; }
-        .hud-line { margin-bottom: 8px; font-size: 14px; font-weight: bold; letter-spacing: 1px; }
-        .data-value { color: #fff; }
-        .alert { color: #f0f; text-shadow: 0 0 5px #f0f; }
-        
-        /* Video Feed (El Ojo del Sistema) */
-        #video-feed { position: absolute; top: 20px; right: 20px; width: 240px; height: 180px; transform: scaleX(-1); border: 1px solid #0ff; box-shadow: 0 0 15px rgba(0, 255, 255, 0.2); z-index: 5; border-radius: 4px; object-fit: cover; opacity: 0.8; }
-        
-        /* Boot Screen para bypassear seguridad del navegador */
-        #boot-screen { position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.9); z-index: 50; display: flex; flex-direction: column; justify-content: center; align-items: center; }
-        #start-btn { padding: 15px 30px; font-size: 18px; font-weight: bold; color: #000; background: #0ff; border: none; cursor: pointer; text-transform: uppercase; letter-spacing: 2px; box-shadow: 0 0 20px #0ff; transition: all 0.1s; font-family: inherit; }
-        #start-btn:active { transform: scale(0.95); box-shadow: 0 0 5px #0ff; }
-        #status-log { margin-top: 20px; font-size: 12px; color: #888; max-width: 400px; text-align: center; }
-    </style>
-    <!-- MediaPipe Vision Task -->
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/vision_bundle.js" crossorigin="anonymous"></script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SGX Spatial: Law's Sandbox (Ultimate 360 Edition)</title>
+  
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: { extend: { fontFamily: { sans: ['Inter', 'sans-serif'], mono: ['JetBrains Mono', 'monospace'] } } }
+    }
+  </script>
+
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700;900&family=JetBrains+Mono&display=swap');
+    body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background-color: #050505; color: white; user-select: none; }
+    #root { width: 100%; height: 100%; }
+    
+    @keyframes shamblesFlash {
+      0% { background-color: rgba(0, 255, 255, 0); }
+      15% { background-color: rgba(0, 255, 255, 0.8); }
+      100% { background-color: rgba(0, 255, 255, 0); }
+    }
+    .flash-active { animation: shamblesFlash 0.3s ease-out; }
+    ::-webkit-scrollbar { width: 0px; }
+  </style>
+
+  <script type="importmap">
+    {
+      "imports": {
+        "react": "https://esm.sh/react@18.2.0",
+        "react/jsx-runtime": "https://esm.sh/react@18.2.0/jsx-runtime",
+        "react-dom": "https://esm.sh/react-dom@18.2.0",
+        "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
+        "three": "https://esm.sh/three@0.160.0",
+        "@react-three/fiber": "https://esm.sh/@react-three/fiber@8.15.12?external=react,react-dom,three",
+        "@react-three/drei": "https://esm.sh/@react-three/drei@9.96.1?external=react,react-dom,three,@react-three/fiber",
+        "@react-three/postprocessing": "https://esm.sh/@react-three/postprocessing@2.16.0?external=react,react-dom,three,@react-three/fiber",
+        "@mediapipe/tasks-vision": "https://esm.sh/@mediapipe/tasks-vision@0.10.17",
+        "lucide-react": "https://esm.sh/lucide-react@0.303.0?external=react"
+      }
+    }
+  </script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 </head>
 <body>
+  <div id="root"></div>
 
-    <!-- BOOT SEQUENCE (Requiere interacción para permisos) -->
-    <div id="boot-screen">
-        <button id="start-btn">Iniciar Enlace Espacial (Ope Ope)</button>
-        <div id="status-log">Esperando orden ejecutiva...</div>
-    </div>
+  <script type="text/babel" data-type="module" data-presets="react">
+    import React, { useEffect, useRef, useState, useMemo } from 'react';
+    import { createRoot } from 'react-dom/client';
+    import * as THREE from 'three';
+    import { Canvas, useFrame } from '@react-three/fiber';
+    import { OrbitControls, PerspectiveCamera, Grid } from '@react-three/drei';
+    import { EffectComposer, Bloom, Vignette, ChromaticAberration } from '@react-three/postprocessing';
+    import { HandLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
+    import { Activity, Scissors, ChevronUp, ChevronDown, Layers } from 'lucide-react';
 
-    <!-- HUD -->
-    <div id="ui-layer">
-        <div class="hud-line">SISTEMA: <span class="data-value" id="sys-status">STANDBY</span></div>
-        <div class="hud-line">ROOM: <span class="data-value" id="room-status">INACTIVO</span></div>
-        <div class="hud-line">VECTOR CORTE: <span class="data-value" id="cut-vector">[0.00, 0.00, 0.00]</span></div>
-    </div>
+    const BRAND = { CYAN: '#00ffff', MAGENTA: '#ff00ff', AMARILLO: '#ffaa00', METAL: '#1a1a1a', TARGET: '#ff0055' };
 
-    <!-- CÁMARA INVISIBLE PERO ACTIVA -->
-    <video id="video-feed" autoplay playsinline></video>
-    <div id="canvas-container"></div>
+    // ==========================================
+    // UTILIDAD: SINCRONIZADOR DE CÁMARA (Para 360º Control)
+    // ==========================================
+    const CameraTracker = ({ cameraRef }) => {
+        useFrame(({ camera }) => {
+            cameraRef.current = camera;
+        });
+        return null;
+    };
 
-    <script type="module">
-        // Módulos estáticos para evitar fallos de importmap en sandboxes
-        import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.150.1/build/three.module.js';
-        import { OrbitControls } from 'https://cdn.jsdelivr.net/npm/three@0.150.1/examples/jsm/controls/OrbitControls.js';
+    // ==========================================
+    // UI HOLOGRÁFICA (PUNTEROS) - RENDIMIENTO OPTIMIZADO
+    // ==========================================
+    const HoloPointer = ({ positionRef, color, isTrackedRef, isPinchingRef }) => {
+        const ref = useRef();
+        const ringRef = useRef();
 
-        // --- ARQUITECTURA DE VARIABLES ---
-        let scene, camera, renderer, controls;
-        let targetMeshGroup, roomSphere;
-        const cuttingPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
-        const planeHelper = new THREE.PlaneHelper(cuttingPlane, 5, 0xff00ff);
-        
-        // Variables de Motor Espacial
-        let handLandmarker, video;
-        let lastVideoTime = -1;
-        let isSystemActive = false;
-
-        // Anti-Fricción (Suavizado de tracking)
-        const LERP_FACTOR = 0.2;
-        const targetPlaneNormal = new THREE.Vector3(0, 1, 0);
-        let targetPlaneConstant = 0;
-
-        // --- UI LOGGING ---
-        const log = (msg) => document.getElementById('status-log').innerText = msg;
-
-        // --- 1. BOOT SEQUENCE ---
-        document.getElementById('start-btn').addEventListener('click', async () => {
-            document.getElementById('start-btn').style.display = 'none';
-            log("Inicializando Entorno 3D...");
-            initThreeJS();
+        useFrame((state) => {
+            if (!ref.current) return;
+            const tracked = isTrackedRef.current;
+            ref.current.visible = tracked;
             
-            log("Cargando Modelos de Visión (MediaPipe)...");
-            await initMediaPipe();
+            if (!tracked) return;
             
-            log("Solicitando acceso óptico...");
-            await startCamera();
-            
-            document.getElementById('boot-screen').style.display = 'none';
-            document.getElementById('sys-status').innerText = "ONLINE";
-            document.getElementById('sys-status').style.color = "#0f0";
-            isSystemActive = true;
-            
-            renderLoop(); // Ignición del motor
+            ref.current.position.lerp(positionRef.current, 0.4);
+            if (ringRef.current) {
+                ringRef.current.rotation.x = state.clock.elapsedTime * 3;
+                ringRef.current.rotation.y = state.clock.elapsedTime * 2;
+                let scale = isPinchingRef.current ? 0.5 : 1.0;
+                ringRef.current.scale.lerp(new THREE.Vector3(scale, scale, scale), 0.2);
+            }
         });
 
-        // --- 2. THREE.JS KERNEL ---
-        function initThreeJS() {
-            scene = new THREE.Scene();
-            scene.fog = new THREE.FogExp2(0x020202, 0.02);
+        return (
+            <group ref={ref}>
+                <mesh>
+                    <sphereGeometry args={[0.15, 16, 16]} />
+                    <meshBasicMaterial color={color} toneMapped={false} transparent opacity={0.8} />
+                </mesh>
+                <mesh ref={ringRef}>
+                    <torusGeometry args={[0.4, 0.02, 16, 32]} />
+                    <meshBasicMaterial color={color} toneMapped={false} transparent opacity={1} />
+                </mesh>
+            </group>
+        );
+    };
 
-            camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 100);
-            camera.position.set(0, 0, 8); // Vista frontal inicial
+    // ==========================================
+    // ENTIDADES DESTRUCTIBLES (FÍSICAS PURAS EN GPU)
+    // ==========================================
+    const DestructibleEntity = ({ data, appStateRef }) => {
+        const ref = useRef();
+        const targetGlowRef = useRef();
+        const amputatePlane = useMemo(() => new THREE.Plane(), []);
+        const teleportKeyRef = useRef(0);
 
-            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-            renderer.setSize(window.innerWidth, window.innerHeight);
-            renderer.setPixelRatio(window.devicePixelRatio);
-            renderer.localClippingEnabled = true; // MANDATORIO PARA SHAMBLES
-            document.getElementById('canvas-container').appendChild(renderer.domElement);
-
-            controls = new OrbitControls(camera, renderer.domElement);
-            controls.enableDamping = true;
-            controls.dampingFactor = 0.05;
-
-            // Iluminación
-            scene.add(new THREE.AmbientLight(0x222222));
-            const pointLight = new THREE.PointLight(0x00ffff, 2, 20);
-            pointLight.position.set(2, 5, 5);
-            scene.add(pointLight);
-
-            buildAssets();
-
-            window.addEventListener('resize', () => {
-                camera.aspect = window.innerWidth / window.innerHeight;
-                camera.updateProjectionMatrix();
-                renderer.setSize(window.innerWidth, window.innerHeight);
-            });
-        }
-
-        function buildAssets() {
-            // El Objeto a cortar (Geometría compleja)
-            const geo = new THREE.TorusKnotGeometry(1.5, 0.4, 128, 32);
+        useFrame((state) => {
+            if (!ref.current) return;
             
-            // Material Capa Externa (Metálico)
-            const matOut = new THREE.MeshStandardMaterial({
-                color: 0x888888,
-                roughness: 0.1,
-                metalness: 0.9,
-                clippingPlanes: [cuttingPlane],
-                clipShadows: true,
-                side: THREE.FrontSide
-            });
-
-            // Material Capa Interna (Núcleo de Energía)
-            const matIn = new THREE.MeshStandardMaterial({
-                color: 0x00ffff,
-                emissive: 0x00aaaa,
-                emissiveIntensity: 1,
-                clippingPlanes: [cuttingPlane],
-                clipShadows: true,
-                side: THREE.BackSide
-            });
-
-            targetMeshGroup = new THREE.Group();
-            targetMeshGroup.add(new THREE.Mesh(geo, matOut));
-            targetMeshGroup.add(new THREE.Mesh(geo, matIn));
-            scene.add(targetMeshGroup);
-
-            // Esfera ROOM
-            const roomGeo = new THREE.SphereGeometry(4, 32, 32);
-            const roomMat = new THREE.MeshBasicMaterial({
-                color: 0x00ffff,
-                wireframe: true,
-                transparent: true,
-                opacity: 0.08
-            });
-            roomSphere = new THREE.Mesh(roomGeo, roomMat);
-            roomSphere.scale.set(0.01, 0.01, 0.01);
-            scene.add(roomSphere);
-
-            // Helper de debug
-            planeHelper.visible = false;
-            scene.add(planeHelper);
-        }
-
-        // --- 3. MEDIAPIPE VISION ---
-        async function initMediaPipe() {
-            const vision = await FilesetResolver.forVisionTasks(
-                "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm"
-            );
-            handLandmarker = await HandLandmarker.createFromOptions(vision, {
-                baseOptions: {
-                    modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
-                    delegate: "GPU"
-                },
-                runningMode: "VIDEO",
-                numHands: 1
-            });
-        }
-
-        async function startCamera() {
-            video = document.getElementById('video-feed');
-            try {
-                const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
-                video.srcObject = stream;
-                return new Promise((resolve) => {
-                    video.onloadeddata = () => resolve();
-                });
-            } catch (err) {
-                console.error(err);
-                alert("Error crítico: No hay cámara. El sistema requiere input visual.");
-            }
-        }
-
-        // --- 4. TRADUCCIÓN BIOMÉTRICA -> MATEMÁTICA ---
-        function updateSpatialLogic(landmarks) {
-            // MediaPipe Coords (0 a 1). Transformamos a espacio local.
-            // Punto 0 = Muñeca, 5 = Nudillo Indice, 17 = Nudillo Meñique, 9 = Nudillo Medio
-            
-            // Función Helper: De 2D MediaPipe a vector 3D crudo
-            const toVec = (lm) => {
-                // Invertimos X porque el video está en espejo (transform: scaleX(-1))
-                return new THREE.Vector3(
-                    -(lm.x - 0.5) * 10,  
-                    -(lm.y - 0.5) * 10,  
-                    -lm.z * 10
-                );
-            };
-
-            const wrist = toVec(landmarks[0]);
-            const indexBase = toVec(landmarks[5]);
-            const pinkyBase = toVec(landmarks[17]);
-            const middleBase = toVec(landmarks[9]);
-            const thumbTip = toVec(landmarks[4]);
-            const indexTip = toVec(landmarks[8]);
-
-            // Lógica de "ROOM" (Pinch)
-            const pinchDist = thumbTip.distanceTo(indexTip);
-            if (pinchDist > 1.5) {
-                roomSphere.scale.lerp(new THREE.Vector3(1, 1, 1), 0.1);
-                document.getElementById('room-status').innerText = "EXPANDIDO";
-                planeHelper.visible = true; // Mostrar plano solo si mano está abierta
+            // Físicas: Teletransporte vs Arrastre
+            if (data.teleportKey && data.teleportKey !== teleportKeyRef.current) {
+                ref.current.position.copy(data.pos); // Salto instantáneo (Shambles)
+                teleportKeyRef.current = data.teleportKey;
             } else {
-                roomSphere.scale.lerp(new THREE.Vector3(0.01, 0.01, 0.01), 0.2);
-                document.getElementById('room-status').innerText = "COLAPSADO";
-                planeHelper.visible = false;
+                ref.current.position.lerp(data.pos, 0.3); // Suavizado
             }
+            ref.current.quaternion.slerp(data.rot, 0.3);
 
-            // Lógica "SHAMBLES" (Normal del Plano)
-            // Calculamos los vectores de la palma para obtener la normal perpendicular
-            const v1 = new THREE.Vector3().subVectors(indexBase, wrist);
-            const v2 = new THREE.Vector3().subVectors(pinkyBase, wrist);
-            
-            // Producto Cruz = Vector Normal a la palma
-            const normal = new THREE.Vector3().crossVectors(v1, v2).normalize();
-            
-            // Apuntamos targets para el LERP (Suavizado)
-            targetPlaneNormal.copy(normal);
-            targetPlaneConstant = targetPlaneNormal.dot(middleBase); // El plano pasa por el nudillo central
-
-            // Actualizar UI
-            document.getElementById('cut-vector').innerText = `[${normal.x.toFixed(2)}, ${normal.y.toFixed(2)}, ${normal.z.toFixed(2)}]`;
-        }
-
-        // --- 5. RENDER LOOP ---
-        function renderLoop() {
-            requestAnimationFrame(renderLoop);
-            if (!isSystemActive) return;
-
-            // Inferencia de IA
-            if (video.currentTime !== lastVideoTime) {
-                lastVideoTime = video.currentTime;
-                const results = handLandmarker.detectForVideo(video, performance.now());
-                if (results.landmarks && results.landmarks.length > 0) {
-                    updateSpatialLogic(results.landmarks[0]);
-                } else {
-                    planeHelper.visible = false;
+            // Glow Lógico independiente de React
+            const isTargeted = appStateRef.current.targetIds.includes(data.id);
+            if (targetGlowRef.current) {
+                targetGlowRef.current.visible = isTargeted;
+                if (isTargeted) {
+                    targetGlowRef.current.rotation.x = state.clock.elapsedTime * 0.5;
+                    targetGlowRef.current.rotation.y = state.clock.elapsedTime * 0.5;
+                    targetGlowRef.current.material.opacity = 0.5 + Math.sin(state.clock.elapsedTime * 8) * 0.3;
                 }
             }
 
-            // Aplicar LERP al plano matemático
-            cuttingPlane.normal.lerp(targetPlaneNormal, LERP_FACTOR).normalize();
-            cuttingPlane.constant += (targetPlaneConstant - cuttingPlane.constant) * LERP_FACTOR;
+            // Sincronización Matemática de Corte
+            if (data.cutPlaneLocal) {
+                const matrix = new THREE.Matrix4().compose(ref.current.position, ref.current.quaternion, new THREE.Vector3(1,1,1));
+                amputatePlane.copy(data.cutPlaneLocal).applyMatrix4(matrix);
+            }
+        });
 
-            // Animación pasiva de la malla para ver el corte en acción
-            targetMeshGroup.rotation.x += 0.005;
-            targetMeshGroup.rotation.y += 0.008;
+        const activePlanes = data.cutPlaneLocal ? [amputatePlane] : [];
 
-            controls.update();
-            renderer.render(scene, camera);
+        // RENDER: NÚCLEO EXTRAÍDO
+        if (data.type === 'heart_cube') {
+            return (
+                <group ref={ref}>
+                    <mesh ref={targetGlowRef} scale={1.25} visible={false}>
+                        <icosahedronGeometry args={[1.6, 1]} />
+                        <meshBasicMaterial color={BRAND.TARGET} wireframe transparent toneMapped={false} />
+                    </mesh>
+                    <mesh>
+                        <boxGeometry args={[1.2, 1.2, 1.2]} />
+                        <meshStandardMaterial color={data.color} emissive={data.color} emissiveIntensity={2.5} toneMapped={false} transparent opacity={0.9} />
+                    </mesh>
+                    <lineSegments>
+                        <edgesGeometry args={[new THREE.BoxGeometry(1.3, 1.3, 1.3)]} />
+                        <lineBasicMaterial color={BRAND.CYAN} linewidth={2} toneMapped={false} />
+                    </lineSegments>
+                </group>
+            );
         }
-    </script>
+
+        // RENDER: GEOMETRÍA BASE
+        const getGeometry = () => {
+            switch(data.type) {
+                case 'torus': return <torusKnotGeometry args={[1.5, 0.4, 128, 32]} />;
+                case 'icosa': return <icosahedronGeometry args={[1.8, 0]} />;
+                case 'cylinder': return <cylinderGeometry args={[1.2, 1.2, 3, 32]} />;
+                default: return <boxGeometry args={[2,2,2]} />;
+            }
+        };
+
+        return (
+            <group ref={ref}>
+                <mesh ref={targetGlowRef} scale={1.25} visible={false}>
+                    <icosahedronGeometry args={[2.2, 1]} />
+                    <meshBasicMaterial color={BRAND.TARGET} wireframe transparent toneMapped={false} />
+                </mesh>
+
+                {data.isHeartless ? (
+                    <mesh>
+                        {getGeometry()}
+                        <meshBasicMaterial color={data.color} wireframe transparent opacity={0.15} toneMapped={false} clippingPlanes={activePlanes} />
+                    </mesh>
+                ) : (
+                    <React.Fragment>
+                        <mesh castShadow receiveShadow>
+                            {getGeometry()}
+                            <meshStandardMaterial color={BRAND.METAL} emissive={data.color} emissiveIntensity={0.1} metalness={0.9} roughness={0.2} clippingPlanes={activePlanes} side={THREE.FrontSide} />
+                        </mesh>
+                        <mesh>
+                            {getGeometry()}
+                            <meshStandardMaterial color={data.color} emissive={data.color} emissiveIntensity={4} toneMapped={false} clippingPlanes={activePlanes} side={THREE.BackSide} />
+                        </mesh>
+                    </React.Fragment>
+                )}
+            </group>
+        );
+    };
+
+    // ==========================================
+    // DOMO INMERSIVO
+    // ==========================================
+    const SpatialRoom = ({ appStateRef }) => {
+        const ref = useRef();
+        useFrame((state) => {
+            if (ref.current) {
+                const targetScale = appStateRef.current.roomActive ? 1.0 : 0.01;
+                ref.current.scale.lerp(new THREE.Vector3(targetScale, targetScale, targetScale), 0.1);
+                ref.current.rotation.y = state.clock.elapsedTime * 0.02;
+                ref.current.rotation.x = state.clock.elapsedTime * 0.01;
+            }
+        });
+        return (
+            <mesh ref={ref}>
+                <sphereGeometry args={[60, 32, 32]} />
+                <meshBasicMaterial color={BRAND.CYAN} wireframe transparent opacity={0.05} toneMapped={false} side={THREE.BackSide} />
+            </mesh>
+        );
+    };
+
+    // ==========================================
+    // MOTOR PRINCIPAL
+    // ==========================================
+    function App() {
+        const videoRef = useRef(null);
+        const cameraRef = useRef(null);
+
+        // ESTADO MUTABLE (Lógica 60fps sin afectar a React)
+        const appState = useRef({
+            roomActive: false,
+            targetIds: [],
+        });
+        const pointers = useRef({
+            leftTracked: false, rightTracked: false,
+            rightPinching: false, leftPinching: false
+        });
+        
+        // ESTADO REACTIVO (Sólo para actualizar el HUD de vez en cuando)
+        const [uiState, setUiState] = useState({
+            roomActive: false,
+            targetCount: 0,
+            debugLog: "SISTEMA INICIADO",
+            flash: false
+        });
+        const [isMenuOpen, setIsMenuOpen] = useState(false);
+        const [, setRenderTick] = useState(0); 
+
+        const leftPointerRef = useRef(new THREE.Vector3());
+        const rightPointerRef = useRef(new THREE.Vector3());
+        const prevGesturesLeft = useRef({});
+        const prevGesturesRight = useRef({});
+
+        const entitiesRef = useRef([
+            { id: 'e1', type: 'torus', pos: new THREE.Vector3(-6, 0, 0), rot: new THREE.Quaternion(), state: 'intact', color: BRAND.CYAN },
+            { id: 'e2', type: 'icosa', pos: new THREE.Vector3(0, 0, 0), rot: new THREE.Quaternion(), state: 'intact', color: BRAND.MAGENTA },
+            { id: 'e3', type: 'cylinder', pos: new THREE.Vector3(6, 0, 0), rot: new THREE.Quaternion(), state: 'intact', color: BRAND.AMARILLO }
+        ]);
+
+        const timersRef = useRef({ fistHold: null, lastRoomToggle: 0 });
+        const grabbedItemRef = useRef(null);
+
+        // Actualizador de UI eficiente
+        const dispatchUI = (logMsg, overrideFlash = false) => {
+            setUiState(prev => ({
+                roomActive: appState.current.roomActive,
+                targetCount: appState.current.targetIds.length,
+                debugLog: logMsg || prev.debugLog,
+                flash: overrideFlash ? true : prev.flash
+            }));
+            if (overrideFlash) {
+                setTimeout(() => setUiState(prev => ({ ...prev, flash: false })), 300);
+            }
+        };
+
+        const dist = (p1, p2) => Math.hypot(p1.x - p2.x, p1.y - p2.y, p1.z - p2.z);
+
+        // MAGIA 360º: Vector Relativo a la Cámara
+        const getHandPos3D = (lm) => {
+            const rawVector = new THREE.Vector3((0.5 - lm.x) * 25, (0.5 - lm.y) * 25, -lm.z * 25);
+            if (cameraRef.current) {
+                // Al rotar la cámara, rotamos el vector. Así la mano siempre se alinea con la vista
+                rawVector.applyQuaternion(cameraRef.current.quaternion);
+            }
+            return rawVector;
+        };
+
+        const analyzeGestures = (landmarks) => {
+            const wrist = landmarks[0];
+            const isExtended = (tip, pip) => dist(landmarks[tip], wrist) > dist(landmarks[pip], wrist) + 0.02;
+            
+            const index = isExtended(8, 6);
+            const middle = isExtended(12, 10);
+            const ring = isExtended(16, 14);
+            const pinky = isExtended(20, 18);
+
+            const v1 = new THREE.Vector3().subVectors(getHandPos3D(landmarks[5]), getHandPos3D(wrist));
+            const v2 = new THREE.Vector3().subVectors(getHandPos3D(landmarks[17]), getHandPos3D(wrist));
+            const normal = new THREE.Vector3().crossVectors(v2, v1).normalize(); 
+            const isPalmDown = normal.y < -0.2;
+
+            const isIndexPinch = dist(landmarks[4], landmarks[8]) < 0.05;
+            const isPinkyPinch = dist(landmarks[4], landmarks[20]) < 0.05;
+
+            return {
+                isFist: !index && !middle && !ring && !pinky,
+                isOpen: index && middle && ring && pinky,
+                isPalmDown: isPalmDown,
+                palmNormal: normal,
+                isIndexPinch: isIndexPinch && !isPinkyPinch,
+                isPinkyPinch: isPinkyPinch && !isIndexPinch,
+                isShambles: index && middle && !ring && !pinky && !isIndexPinch && !isPinkyPinch 
+            };
+        };
+
+        useEffect(() => {
+            let landmarker;
+            let reqId;
+
+            const init = async () => {
+                const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.17/wasm");
+                landmarker = await HandLandmarker.createFromOptions(vision, {
+                    baseOptions: { modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task", delegate: "GPU" },
+                    runningMode: "VIDEO", numHands: 2
+                });
+
+                if (navigator.mediaDevices) {
+                    const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
+                    videoRef.current.srcObject = stream;
+                    videoRef.current.onloadedmetadata = () => videoRef.current.play();
+                }
+            };
+            init();
+
+            const processFrame = () => {
+                if (videoRef.current?.readyState >= 2 && landmarker) {
+                    const results = landmarker.detectForVideo(videoRef.current, performance.now());
+                    
+                    if (results.landmarks && results.landmarks.length > 0) {
+                        let leftHand = null, rightHand = null;
+                        
+                        results.handednesses.forEach((h, i) => {
+                            if (h[0].categoryName === "Right") leftHand = results.landmarks[i];
+                            else if (h[0].categoryName === "Left") rightHand = results.landmarks[i];
+                        });
+
+                        pointers.current.leftTracked = !!leftHand;
+                        pointers.current.rightTracked = !!rightHand;
+
+                        let logUpdate = null;
+
+                        // ==========================================
+                        // MANO DERECHA (Mando y Telequinesis)
+                        // ==========================================
+                        if (rightHand) {
+                            const gestures = analyzeGestures(rightHand);
+                            const rightPos = getHandPos3D(rightHand[9]);
+                            const indexTip = getHandPos3D(rightHand[8]);
+
+                            rightPointerRef.current.copy(indexTip);
+                            pointers.current.rightPinching = gestures.isIndexPinch;
+
+                            // 1. GRAB TELEQUINESIS
+                            if (gestures.isIndexPinch) {
+                                if (!grabbedItemRef.current) {
+                                    let closest = null, minDist = Infinity;
+                                    entitiesRef.current.forEach(ent => {
+                                        const d = indexTip.distanceTo(ent.pos);
+                                        if (d < 6.0 && d < minDist) { minDist = d; closest = ent; }
+                                    });
+                                    if (closest) grabbedItemRef.current = closest;
+                                }
+                                if (grabbedItemRef.current) {
+                                    grabbedItemRef.current.pos.copy(rightPos); 
+                                }
+                            } else {
+                                grabbedItemRef.current = null;
+                            }
+
+                            // 2. TARGET LOCK
+                            if (gestures.isPinkyPinch && !prevGesturesRight.current.isPinkyPinch) {
+                                let closest = null, minDist = Infinity;
+                                entitiesRef.current.forEach(ent => {
+                                    const d = rightPos.distanceTo(ent.pos);
+                                    if (d < 15.0 && d < minDist) { minDist = d; closest = ent; }
+                                });
+                                
+                                if (closest) {
+                                    if (appState.current.targetIds.includes(closest.id)) {
+                                        appState.current.targetIds = appState.current.targetIds.filter(id => id !== closest.id);
+                                        logUpdate = `TARGET UNLOCKED: ${closest.type.toUpperCase()}`;
+                                    } else {
+                                        appState.current.targetIds.push(closest.id);
+                                        logUpdate = `TARGET LOCKED: ${closest.type.toUpperCase()}`;
+                                    }
+                                } else if (appState.current.targetIds.length > 0) {
+                                    appState.current.targetIds = [];
+                                    logUpdate = `TARGETS LIMPIADOS`;
+                                }
+                                dispatchUI(logUpdate);
+                            }
+                            prevGesturesRight.current = gestures;
+                        }
+
+                        // ==========================================
+                        // MANO IZQUIERDA (Ope Ope Poderes)
+                        // ==========================================
+                        if (leftHand) {
+                            const gestures = analyzeGestures(leftHand);
+                            const leftPos = getHandPos3D(leftHand[9]);
+                            leftPointerRef.current.copy(leftPos);
+
+                            // ROOM TOGGLE
+                            if (gestures.isOpen && gestures.isPalmDown && !appState.current.roomActive) {
+                                if (performance.now() - timersRef.current.lastRoomToggle > 1000) {
+                                    appState.current.roomActive = true;
+                                    timersRef.current.lastRoomToggle = performance.now();
+                                    dispatchUI(`ROOM DOMAIN: ACTIVADO`);
+                                }
+                            }
+                            
+                            if (gestures.isFist && appState.current.roomActive) {
+                                if (!timersRef.current.fistHold) timersRef.current.fistHold = performance.now();
+                                else if (performance.now() - timersRef.current.fistHold > 3000) { 
+                                    appState.current.roomActive = false;
+                                    timersRef.current.fistHold = null;
+                                    timersRef.current.lastRoomToggle = performance.now();
+                                    dispatchUI(`ROOM DOMAIN: COLAPSADO`);
+                                }
+                            } else {
+                                timersRef.current.fistHold = null;
+                            }
+
+                            // PODERES DENTRO DE ROOM
+                            if (appState.current.roomActive && appState.current.targetIds.length > 0) {
+                                
+                                // [A] AMPUTATE (Corte)
+                                if (gestures.isIndexPinch && !prevGesturesLeft.current.isIndexPinch) {
+                                    let entitiesChanged = false;
+                                    appState.current.targetIds.forEach(tId => {
+                                        const target = entitiesRef.current.find(e => e.id === tId && !e.cutPlaneLocal && e.type !== 'heart_cube');
+                                        if (target) {
+                                            target.state = 'halved';
+                                            
+                                            const localNormal = gestures.palmNormal.clone().applyQuaternion(target.rot.clone().invert()).normalize();
+                                            const localPlane = new THREE.Plane(localNormal, 0); 
+                                            
+                                            target.cutPlaneLocal = localPlane;
+                                            
+                                            const inversePlane = localPlane.clone();
+                                            inversePlane.normal.negate();
+
+                                            const offset = gestures.palmNormal.clone().multiplyScalar(0.8);
+                                            const newId = target.id + '_half';
+                                            
+                                            if (!entitiesRef.current.some(e => e.id === newId)) {
+                                                entitiesRef.current.push({
+                                                    id: newId, type: target.type, 
+                                                    pos: target.pos.clone().add(offset), rot: target.rot.clone(), 
+                                                    state: 'halved', color: target.color,
+                                                    cutPlaneLocal: inversePlane, isHeartless: target.isHeartless
+                                                });
+                                                entitiesChanged = true;
+                                            }
+                                        }
+                                    });
+                                    if (entitiesChanged) {
+                                        dispatchUI(`AMPUTATE: SECCIONADO PERFECTO`);
+                                        setRenderTick(t => t + 1); // Montar nuevo Mesh
+                                    }
+                                }
+
+                                // [B] MES (Extracción Núcleo)
+                                if (gestures.isPinkyPinch && !prevGesturesLeft.current.isPinkyPinch) {
+                                    let offsetZ = 2.0; 
+                                    let entitiesChanged = false;
+                                    appState.current.targetIds.forEach(tId => {
+                                        const target = entitiesRef.current.find(e => e.id === tId && e.type !== 'heart_cube' && !e.isHeartless);
+                                        if (target) {
+                                            target.isHeartless = true; 
+                                            const newId = target.id + '_heart';
+                                            
+                                            if (!entitiesRef.current.some(e => e.id === newId)) {
+                                                entitiesRef.current.push({
+                                                    id: newId, type: 'heart_cube', 
+                                                    pos: target.pos.clone().add(new THREE.Vector3(0, 0, offsetZ)), 
+                                                    rot: new THREE.Quaternion(), state: 'extracted', color: target.color
+                                                });
+                                                entitiesChanged = true;
+                                            }
+                                            offsetZ += 1.5; 
+                                        }
+                                    });
+                                    if (entitiesChanged) {
+                                        dispatchUI(`MES: NÚCLEO EXTRAÍDO`);
+                                        setRenderTick(t => t + 1); // Montar nuevo Mesh
+                                    }
+                                }
+
+                                // [C] SHAMBLES (Swap)
+                                if (gestures.isShambles && !prevGesturesLeft.current.isShambles) {
+                                    if (appState.current.targetIds.length === 2) {
+                                        const t1 = entitiesRef.current.find(e => e.id === appState.current.targetIds[0]);
+                                        const t2 = entitiesRef.current.find(e => e.id === appState.current.targetIds[1]);
+                                        
+                                        if (t1 && t2) {
+                                            const tempPos = t1.pos.clone();
+                                            t1.pos.copy(t2.pos);
+                                            t2.pos.copy(tempPos);
+                                            
+                                            t1.teleportKey = (t1.teleportKey || 0) + 1;
+                                            t2.teleportKey = (t2.teleportKey || 0) + 1;
+                                            
+                                            appState.current.targetIds = []; // Clear
+                                            dispatchUI(`SHAMBLES: SWAP COMPLETADO`, true); // True activa el Flash
+                                        }
+                                    }
+                                }
+                            }
+                            prevGesturesLeft.current = gestures;
+                        }
+
+                    } else {
+                        pointers.current.leftTracked = false;
+                        pointers.current.rightTracked = false;
+                    }
+                }
+                reqId = requestAnimationFrame(processFrame);
+            };
+            reqId = requestAnimationFrame(processFrame);
+            return () => { cancelAnimationFrame(reqId); landmarker?.close(); };
+        }, []);
+
+        return (
+            <div className={`relative w-full h-screen select-none bg-[#050505] ${uiState.flash ? 'flash-active' : ''}`}>
+                <video ref={videoRef} className="hidden" playsInline muted />
+                
+                <div className="absolute inset-0 z-0">
+                    <Canvas gl={{ localClippingEnabled: true, antialias: false, toneMapping: THREE.NoToneMapping }}>
+                        <CameraTracker cameraRef={cameraRef} />
+                        
+                        <color attach="background" args={['#050505']} />
+                        <PerspectiveCamera makeDefault position={[0, 0, 24]} fov={45} />
+                        <OrbitControls makeDefault enableDamping dampingFactor={0.05} />
+                        
+                        <ambientLight intensity={0.5} />
+                        <directionalLight position={[10, 20, 10]} intensity={3} color="#ffffff" />
+                        <directionalLight position={[-10, -20, -10]} intensity={1} color={BRAND.CYAN} />
+                        
+                        <Grid infiniteGrid fadeDistance={40} fadeStrength={5} cellSize={1} sectionColor={BRAND.CYAN} cellColor="#111" position={[0, -6, 0]} />
+
+                        <SpatialRoom appStateRef={appState} />
+                        
+                        <HoloPointer positionRef={leftPointerRef} color={BRAND.CYAN} isTrackedRef={{current: pointers.current.leftTracked}} isPinchingRef={{current: false}} />
+                        <HoloPointer positionRef={rightPointerRef} color={BRAND.MAGENTA} isTrackedRef={{current: pointers.current.rightTracked}} isPinchingRef={{current: pointers.current.rightPinching}} />
+                        
+                        {entitiesRef.current.map(ent => (
+                            <DestructibleEntity key={ent.id} data={ent} appStateRef={appState} />
+                        ))}
+
+                        <EffectComposer disableNormalPass>
+                            <Bloom luminanceThreshold={0.5} intensity={2.0} mipmapBlur />
+                            <ChromaticAberration offset={new THREE.Vector2(0.003, 0.003)} />
+                            <Vignette eskil={false} offset={0.1} darkness={1.2} />
+                        </EffectComposer>
+                    </Canvas>
+                </div>
+
+                {/* HUD LOG (Top) */}
+                <div className="absolute top-6 left-6 z-20 pointer-events-none">
+                    <div className="flex items-center gap-3 bg-black/60 backdrop-blur-md p-3 border-l-4 border-l-[#00ffff] rounded-r-xl shadow-2xl">
+                        <Activity className="text-[#00ffff] w-5 h-5 animate-pulse" />
+                        <div>
+                            <h1 className="text-lg font-black uppercase leading-none tracking-tighter">Ope_Ope<span className="text-[#00ffff]">.Sandbox</span></h1>
+                            <p className="text-[9px] text-[#00ffff] font-bold uppercase tracking-[0.2em]">{uiState.debugLog}</p>
+                        </div>
+                    </div>
+                </div>
+
+                {/* HUD STATUS & MENU COMPACTO (Bottom) */}
+                <div className="absolute bottom-6 left-6 z-20 flex flex-col gap-2">
+                    <div className="flex gap-2 pointer-events-none">
+                        <div className={`px-3 py-1.5 text-[10px] font-black uppercase tracking-widest rounded-lg border w-fit backdrop-blur-md transition-colors ${uiState.roomActive ? 'bg-cyan-900/30 border-cyan-400 text-cyan-400' : 'bg-black/30 border-white/10 text-neutral-500'}`}>
+                            Room: {uiState.roomActive ? 'ON' : 'OFF'}
+                        </div>
+                        <div className={`px-3 py-1.5 text-[10px] font-black uppercase tracking-widest rounded-lg border w-fit backdrop-blur-md flex items-center gap-2 transition-colors ${uiState.targetCount > 0 ? 'bg-[#ff0055]/20 border-[#ff0055] text-[#ff0055]' : 'bg-black/30 border-white/10 text-neutral-500'}`}>
+                            <Layers className="w-3.5 h-3.5"/> Targets: {uiState.targetCount}
+                        </div>
+                    </div>
+                    
+                    <button 
+                        onClick={() => setIsMenuOpen(!isMenuOpen)}
+                        className="flex items-center justify-between gap-2 bg-black/80 backdrop-blur-md border border-white/20 rounded-xl px-4 py-2 text-xs font-black uppercase tracking-widest text-white shadow-xl hover:bg-white/10 transition-colors w-fit"
+                    >
+                        <span><Scissors className="inline w-3.5 h-3.5 mr-2 text-cyan-400"/> Guía de Operaciones</span>
+                        {isMenuOpen ? <ChevronDown className="w-4 h-4"/> : <ChevronUp className="w-4 h-4"/>}
+                    </button>
+
+                    {isMenuOpen && (
+                        <div className="bg-black/80 backdrop-blur-md border border-white/10 rounded-xl p-4 text-[10px] uppercase tracking-widest text-neutral-300 w-80 shadow-2xl origin-bottom animate-in fade-in slide-in-from-bottom-2">
+                            <div className="grid grid-cols-2 gap-4">
+                                <ul className="space-y-2">
+                                    <li className="text-magenta-400 font-bold border-b border-white/10 pb-1 mb-1">Mano Derecha (Mando)</li>
+                                    <li><span className="text-white">Pinch Índice:</span> Mover 360º</li>
+                                    <li><span className="text-white">Pinch Meñique:</span> Fijar/Soltar Target</li>
+                                </ul>
+                                <ul className="space-y-2">
+                                    <li className="text-cyan-400 font-bold border-b border-white/10 pb-1 mb-1">Mano Izquierda (Poder)</li>
+                                    <li><span className="text-white">Palma Abajo:</span> Activar Room</li>
+                                    <li><span className="text-white">Pinch Índice:</span> Amputate (Corte Perfecto)</li>
+                                    <li><span className="text-white">Pinch Meñique:</span> Mes (Extraer Núcleo)</li>
+                                    <li><span className="text-white">2 Dedos:</span> Shambles (Swap)</li>
+                                </ul>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            </div>
+        );
+    }
+    createRoot(document.getElementById('root')).render(<App />);
+  </script>
 </body>
 </html>
