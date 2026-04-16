@@ -136,7 +136,7 @@
                     child.material = new THREE.MeshStandardMaterial({
                         color: color,
                         emissive: color,
-                        emissiveIntensity: 2,
+                        emissiveIntensity: 4,
                         toneMapped: false,
                         side: THREE.BackSide
                     });
@@ -307,7 +307,7 @@
         const entitiesRef = useRef([
             { id: 'e1', type: 'gomu', url: 'https://static.wixstatic.com/3d/fe81a7_671d80a702e24ca28b2b3b3fe936de2f.glb', pos: new THREE.Vector3(-6, 0, 0), rot: new THREE.Quaternion(), state: 'intact', color: '#9900ff', scale: 2 },
             { id: 'e2', type: 'ope',  url: 'https://static.wixstatic.com/3d/fe81a7_25ae6c9870b849de9299c8752be38376.glb', pos: new THREE.Vector3(0, 0, 0), rot: new THREE.Quaternion(), state: 'intact', color: '#ff0055', scale: 3.5 },
-            { id: 'e3', type: 'mera', url: 'https://static.wixstatic.com/3d/fe81a7_1d84574e6d744b4ca6f04b909c29920a.glb', pos: new THREE.Vector3(6, 0, 0), rot: new THREE.Quaternion(), state: 'intact', color: '#ff5500', scale: 2.5 }
+            { id: 'e3', type: 'mera', url: 'https://static.wixstatic.com/3d/fe81a7_b0f4340e6ae6485fa974813fa445c6e6.glb', pos: new THREE.Vector3(6, 0, 0), rot: new THREE.Quaternion(), state: 'intact', color: '#ff5500', scale: 2.5 }
         ]);
 
         const timersRef = useRef({ fistHold: null, lastRoomToggle: 0 });
@@ -598,7 +598,7 @@
                         <OrbitControls makeDefault enableDamping dampingFactor={0.05} />
                         
                         <ambientLight intensity={0.2} />
-                        <directionalLight position={[10, 20, 10]} intensity={1} color="#ffffff" />
+                        <directionalLight position={[10, 20, 10]} intensity={.5} color="#ffffff" />
                         <directionalLight position={[-10, -20, -10]} intensity={1} color={BRAND.CYAN} />
                         
                         <Grid infiniteGrid fadeDistance={40} fadeStrength={5} cellSize={1} sectionColor={BRAND.CYAN} cellColor="#111" position={[0, -6, 0]} />
@@ -613,9 +613,9 @@
                         ))}
 
                         <EffectComposer disableNormalPass>
-                            <Bloom luminanceThreshold={0.5} intensity={2.0} mipmapBlur />
+                            <Bloom luminanceThreshold={.5} intensity={.25} mipmapBlur />
                             <ChromaticAberration offset={new THREE.Vector2(0.001, 0.001)} />
-                            <Vignette eskil={false} offset={0.1} darkness={1.2} />
+                            <Vignette eskil={false} offset={0.1} darkness={1} />
                         </EffectComposer>
                     </Canvas>
                 </div>
