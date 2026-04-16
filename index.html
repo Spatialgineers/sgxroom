@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>SGX Ope Ope Room</title>
+  <title>SGX Room</title>
   
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
@@ -52,12 +52,17 @@
     import { createRoot } from 'react-dom/client';
     import * as THREE from 'three';
     import { Canvas, useFrame } from '@react-three/fiber';
-    import { OrbitControls, PerspectiveCamera, Grid } from '@react-three/drei';
+    import { OrbitControls, PerspectiveCamera, Grid, useGLTF } from '@react-three/drei';
     import { EffectComposer, Bloom, Vignette, ChromaticAberration } from '@react-three/postprocessing';
     import { HandLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
     import { Activity, Scissors, ChevronUp, ChevronDown, Layers } from 'lucide-react';
 
-    const BRAND = { CYAN: '#00ffff', MAGENTA: '#ff00ff', AMARILLO: '#ffaa00', METAL: '#1a1a1a', TARGET: '#ff0055' };
+    const BRAND = { CYAN: '#00ffff', MAGENTA: '#ff00ff', AMARILLO: '#ffaa00', METAL: '#1a1a1a', TARGET: '#32527b' };
+
+    // Precargar modelos para evitar "popping" visual
+    useGLTF.preload('https://static.wixstatic.com/3d/fe81a7_671d80a702e24ca28b2b3b3fe936de2f.glb');
+    useGLTF.preload('https://static.wixstatic.com/3d/fe81a7_25ae6c9870b849de9299c8752be38376.glb');
+    useGLTF.preload('https://static.wixstatic.com/3d/fe81a7_1d84574e6d744b4ca6f04b909c29920a.glb');
 
     // ==========================================
     // UTILIDAD: SINCRONIZADOR DE CÁMARA (Para 360º Control)
@@ -107,6 +112,75 @@
     };
 
     // ==========================================
+    // COMPONENTE: FRUTA DEL DIABLO (CARGADOR GLB DINÁMICO)
+    // ==========================================
+    const DevilFruit = ({ url, activePlanes, color, isHeartless, scale }) => {
+        const { scene } = useGLTF(url);
+        
+        // Clonamos la escena para tener mallas independientes y no afectar a las demás frutas
+        const outerScene = useMemo(() => {
+            const s = scene.clone(true);
+            s.traverse((child) => {
+                if (child.isMesh) {
+                    // Clonar el material es vital para que los cortes de una fruta no corten a otra igual
+                    child.material = child.material.clone();
+                }
+            });
+            return s;
+        }, [scene]);
+
+        const innerScene = useMemo(() => {
+            const s = scene.clone(true);
+            s.traverse((child) => {
+                if (child.isMesh) {
+                    child.material = new THREE.MeshStandardMaterial({
+                        color: color,
+                        emissive: color,
+                        emissiveIntensity: 2,
+                        toneMapped: false,
+                        side: THREE.BackSide
+                    });
+                }
+            });
+            return s;
+        }, [scene, color]);
+
+        // Aplicamos los planos de corte y el wireframe
+        useEffect(() => {
+            outerScene.traverse((child) => {
+                if (child.isMesh) {
+                    if (isHeartless) {
+                        child.material = new THREE.MeshBasicMaterial({
+                            color: color,
+                            wireframe: true,
+                            transparent: true,
+                            opacity: 0.15,
+                            toneMapped: false,
+                            clippingPlanes: activePlanes
+                        });
+                    } else {
+                        child.material.clippingPlanes = activePlanes;
+                        child.material.side = THREE.FrontSide;
+                    }
+                }
+            });
+            
+            innerScene.traverse((child) => {
+                if (child.isMesh) {
+                    child.material.clippingPlanes = activePlanes;
+                }
+            });
+        }, [outerScene, innerScene, activePlanes, isHeartless, color]);
+
+        return (
+            <group scale={[scale, scale, scale]}>
+                <primitive object={outerScene} />
+                {!isHeartless && <primitive object={innerScene} />}
+            </group>
+        );
+    };
+
+    // ==========================================
     // ENTIDADES DESTRUCTIBLES (FÍSICAS PURAS EN GPU)
     // ==========================================
     const DestructibleEntity = ({ data, appStateRef }) => {
@@ -147,59 +221,30 @@
 
         const activePlanes = data.cutPlaneLocal ? [amputatePlane] : [];
 
-        // RENDER: NÚCLEO EXTRAÍDO
-        if (data.type === 'heart_cube') {
-            return (
-                <group ref={ref}>
-                    <mesh ref={targetGlowRef} scale={1.25} visible={false}>
-                        <icosahedronGeometry args={[1.6, 1]} />
-                        <meshBasicMaterial color={BRAND.TARGET} wireframe transparent toneMapped={false} />
-                    </mesh>
-                    <mesh>
-                        <boxGeometry args={[1.2, 1.2, 1.2]} />
-                        <meshStandardMaterial color={data.color} emissive={data.color} emissiveIntensity={2.5} toneMapped={false} transparent opacity={0.9} />
-                    </mesh>
-                    <lineSegments>
-                        <edgesGeometry args={[new THREE.BoxGeometry(1.3, 1.3, 1.3)]} />
-                        <lineBasicMaterial color={BRAND.CYAN} linewidth={2} toneMapped={false} />
-                    </lineSegments>
-                </group>
-            );
-        }
-
-        // RENDER: GEOMETRÍA BASE
-        const getGeometry = () => {
-            switch(data.type) {
-                case 'torus': return <torusKnotGeometry args={[1.5, 0.4, 128, 32]} />;
-                case 'icosa': return <icosahedronGeometry args={[1.8, 0]} />;
-                case 'cylinder': return <cylinderGeometry args={[1.2, 1.2, 3, 32]} />;
-                default: return <boxGeometry args={[2,2,2]} />;
-            }
-        };
-
         return (
             <group ref={ref}>
-                <mesh ref={targetGlowRef} scale={1.25} visible={false}>
-                    <icosahedronGeometry args={[2.2, 1]} />
+                {/* Target Glow Adaptativo */}
+                <mesh ref={targetGlowRef} scale={(data.scale || 1) * 1.5} visible={false}>
+                    <icosahedronGeometry args={[1, 1]} />
                     <meshBasicMaterial color={BRAND.TARGET} wireframe transparent toneMapped={false} />
                 </mesh>
 
-                {data.isHeartless ? (
-                    <mesh>
-                        {getGeometry()}
-                        <meshBasicMaterial color={data.color} wireframe transparent opacity={0.15} toneMapped={false} clippingPlanes={activePlanes} />
-                    </mesh>
-                ) : (
-                    <React.Fragment>
-                        <mesh castShadow receiveShadow>
-                            {getGeometry()}
-                            <meshStandardMaterial color={BRAND.METAL} emissive={data.color} emissiveIntensity={0.1} metalness={0.9} roughness={0.2} clippingPlanes={activePlanes} side={THREE.FrontSide} />
-                        </mesh>
+                {/* Renderizado Condicional: Núcleo (Mes) vs Frutas (GLB) */}
+                {data.type === 'heart_cube' ? (
+                    <group>
                         <mesh>
-                            {getGeometry()}
-                            <meshStandardMaterial color={data.color} emissive={data.color} emissiveIntensity={4} toneMapped={false} clippingPlanes={activePlanes} side={THREE.BackSide} />
+                            <boxGeometry args={[1.2, 1.2, 1.2]} />
+                            <meshStandardMaterial color={data.color} emissive={data.color} emissiveIntensity={1} toneMapped={false} transparent opacity={0.9} />
                         </mesh>
-                    </React.Fragment>
+                        <lineSegments>
+                            <edgesGeometry args={[new THREE.BoxGeometry(1.3, 1.3, 1.3)]} />
+                            <lineBasicMaterial color={BRAND.CYAN} linewidth={2} toneMapped={false} />
+                        </lineSegments>
+                    </group>
+                ) : (
+                    <React.Suspense fallback={null}>
+                        <DevilFruit url={data.url} activePlanes={activePlanes} color={data.color} isHeartless={data.isHeartless} scale={data.scale} />
+                    </React.Suspense>
                 )}
             </group>
         );
@@ -258,10 +303,11 @@
         const prevGesturesLeft = useRef({});
         const prevGesturesRight = useRef({});
 
+        // NOTA DE ESCALA: Ajusta la propiedad "scale" si los modelos GLB cargan muy grandes o muy pequeños.
         const entitiesRef = useRef([
-            { id: 'e1', type: 'torus', pos: new THREE.Vector3(-6, 0, 0), rot: new THREE.Quaternion(), state: 'intact', color: BRAND.CYAN },
-            { id: 'e2', type: 'icosa', pos: new THREE.Vector3(0, 0, 0), rot: new THREE.Quaternion(), state: 'intact', color: BRAND.MAGENTA },
-            { id: 'e3', type: 'cylinder', pos: new THREE.Vector3(6, 0, 0), rot: new THREE.Quaternion(), state: 'intact', color: BRAND.AMARILLO }
+            { id: 'e1', type: 'gomu', url: 'https://static.wixstatic.com/3d/fe81a7_671d80a702e24ca28b2b3b3fe936de2f.glb', pos: new THREE.Vector3(-6, 0, 0), rot: new THREE.Quaternion(), state: 'intact', color: '#9900ff', scale: 2 },
+            { id: 'e2', type: 'ope',  url: 'https://static.wixstatic.com/3d/fe81a7_25ae6c9870b849de9299c8752be38376.glb', pos: new THREE.Vector3(0, 0, 0), rot: new THREE.Quaternion(), state: 'intact', color: '#ff0055', scale: 3.5 },
+            { id: 'e3', type: 'mera', url: 'https://static.wixstatic.com/3d/fe81a7_1d84574e6d744b4ca6f04b909c29920a.glb', pos: new THREE.Vector3(6, 0, 0), rot: new THREE.Quaternion(), state: 'intact', color: '#ff5500', scale: 2.5 }
         ]);
 
         const timersRef = useRef({ fistHold: null, lastRoomToggle: 0 });
@@ -461,8 +507,9 @@
                                             const newId = target.id + '_half';
                                             
                                             if (!entitiesRef.current.some(e => e.id === newId)) {
+                                                // INYECCIÓN DE URL Y ESCALA PARA QUE LA MITAD CLONADA SE RENDERICE CORRECTAMENTE
                                                 entitiesRef.current.push({
-                                                    id: newId, type: target.type, 
+                                                    id: newId, type: target.type, url: target.url, scale: target.scale,
                                                     pos: target.pos.clone().add(offset), rot: target.rot.clone(), 
                                                     state: 'halved', color: target.color,
                                                     cutPlaneLocal: inversePlane, isHeartless: target.isHeartless
@@ -550,8 +597,8 @@
                         <PerspectiveCamera makeDefault position={[0, 0, 24]} fov={45} />
                         <OrbitControls makeDefault enableDamping dampingFactor={0.05} />
                         
-                        <ambientLight intensity={0.5} />
-                        <directionalLight position={[10, 20, 10]} intensity={3} color="#ffffff" />
+                        <ambientLight intensity={0.2} />
+                        <directionalLight position={[10, 20, 10]} intensity={1} color="#ffffff" />
                         <directionalLight position={[-10, -20, -10]} intensity={1} color={BRAND.CYAN} />
                         
                         <Grid infiniteGrid fadeDistance={40} fadeStrength={5} cellSize={1} sectionColor={BRAND.CYAN} cellColor="#111" position={[0, -6, 0]} />
@@ -567,7 +614,7 @@
 
                         <EffectComposer disableNormalPass>
                             <Bloom luminanceThreshold={0.5} intensity={2.0} mipmapBlur />
-                            <ChromaticAberration offset={new THREE.Vector2(0.003, 0.003)} />
+                            <ChromaticAberration offset={new THREE.Vector2(0.001, 0.001)} />
                             <Vignette eskil={false} offset={0.1} darkness={1.2} />
                         </EffectComposer>
                     </Canvas>
@@ -578,7 +625,7 @@
                     <div className="flex items-center gap-3 bg-black/60 backdrop-blur-md p-3 border-l-4 border-l-[#00ffff] rounded-r-xl shadow-2xl">
                         <Activity className="text-[#00ffff] w-5 h-5 animate-pulse" />
                         <div>
-                            <h1 className="text-lg font-black uppercase leading-none tracking-tighter">Ope Ope <span className="text-[#00ffff]">Room</span></h1>
+                            <h1 className="text-lg font-black uppercase leading-none tracking-tighter">Ope Ope <span className="text-[#00ffff]">Visualizer</span></h1>
                             <p className="text-[9px] text-[#00ffff] font-bold uppercase tracking-[0.2em]">{uiState.debugLog}</p>
                         </div>
                     </div>
