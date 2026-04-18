@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>SGX Room</title>
+  <title>SGX Ope Ope Room</title>
   
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
@@ -14,15 +14,18 @@
 
   <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700;900&family=JetBrains+Mono&display=swap');
-    body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background-color: #050505; color: white; user-select: none; }
+    body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background-color: #000; color: white; user-select: none; touch-action: none; }
     #root { width: 100%; height: 100%; }
     
     @keyframes shamblesFlash {
       0% { background-color: rgba(0, 255, 255, 0); }
-      15% { background-color: rgba(0, 255, 255, 0.8); }
+      15% { background-color: rgba(0, 255, 255, 0.9); }
       100% { background-color: rgba(0, 255, 255, 0); }
     }
-    .flash-active { animation: shamblesFlash 0.3s ease-out; }
+    .flash-active::after { 
+        content: ''; position: absolute; inset: 0; pointer-events: none;
+        animation: shamblesFlash 0.3s ease-out; z-index: 50;
+    }
     ::-webkit-scrollbar { width: 0px; }
   </style>
 
@@ -51,81 +54,196 @@
     import React, { useEffect, useRef, useState, useMemo } from 'react';
     import { createRoot } from 'react-dom/client';
     import * as THREE from 'three';
-    import { Canvas, useFrame } from '@react-three/fiber';
-    import { OrbitControls, PerspectiveCamera, Grid, useGLTF } from '@react-three/drei';
-    import { EffectComposer, Bloom, Vignette, ChromaticAberration } from '@react-three/postprocessing';
+    import { Canvas, useFrame, useThree } from '@react-three/fiber';
+    import { PerspectiveCamera, useGLTF } from '@react-three/drei';
     import { HandLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
-    import { Activity, Scissors, ChevronUp, ChevronDown, Layers } from 'lucide-react';
+    import { Activity, Scissors, ChevronUp, ChevronDown, Layers, Crosshair } from 'lucide-react';
 
-    const BRAND = { CYAN: '#00ffff', MAGENTA: '#ff00ff', AMARILLO: '#ffaa00', METAL: '#1a1a1a', TARGET: '#32527b' };
+    const BRAND = { CYAN: '#00ffff', MAGENTA: '#ff00ff', TARGET: '#00ffff' };
 
-    // Precargar modelos para evitar "popping" visual
     useGLTF.preload('https://static.wixstatic.com/3d/fe81a7_671d80a702e24ca28b2b3b3fe936de2f.glb');
     useGLTF.preload('https://static.wixstatic.com/3d/fe81a7_25ae6c9870b849de9299c8752be38376.glb');
-    useGLTF.preload('https://static.wixstatic.com/3d/fe81a7_1d84574e6d744b4ca6f04b909c29920a.glb');
+    useGLTF.preload('https://static.wixstatic.com/3d/fe81a7_b0f4340e6ae6485fa974813fa445c6e6.glb');
 
     // ==========================================
-    // UTILIDAD: SINCRONIZADOR DE CÁMARA (Para 360º Control)
+    // SHADER DE FONDO NEURAL AR (TINT ENVOLVENTE)
     // ==========================================
-    const CameraTracker = ({ cameraRef }) => {
-        useFrame(({ camera }) => {
-            cameraRef.current = camera;
+    const ARBackground = ({ videoRef, appStateRef }) => {
+        const { size } = useThree();
+        const materialRef = useRef();
+        const [videoTex, setVideoTex] = useState(null);
+        const currentProgress = useRef(0);
+
+        useEffect(() => {
+            if (videoRef.current) {
+                const tex = new THREE.VideoTexture(videoRef.current);
+                tex.minFilter = THREE.LinearFilter;
+                tex.magFilter = THREE.LinearFilter;
+                setVideoTex(tex);
+            }
+        }, [videoRef]);
+
+        const uniforms = useMemo(() => ({
+            tDiffuse: { value: null },
+            uRoomProgress: { value: 0.0 },
+            uTime: { value: 0.0 },
+            uResolution: { value: new THREE.Vector2(1, 1) }
+        }), []);
+
+        useEffect(() => {
+            if (videoTex) uniforms.tDiffuse.value = videoTex;
+        }, [videoTex, uniforms]);
+
+        useFrame((state, delta) => {
+            if (materialRef.current) {
+                const target = appStateRef.current.roomActive ? 1.0 : 0.0;
+                currentProgress.current += (target - currentProgress.current) * (delta * 5.0);
+                
+                materialRef.current.uniforms.uRoomProgress.value = currentProgress.current;
+                materialRef.current.uniforms.uTime.value = state.clock.elapsedTime;
+                materialRef.current.uniforms.uResolution.value.set(size.width, size.height);
+            }
         });
+
+        const vertexShader = `
+            varying vec2 vUv;
+            void main() {
+                vUv = uv;
+                gl_Position = vec4(position, 1.0);
+            }
+        `;
+
+        const fragmentShader = `
+            uniform sampler2D tDiffuse;
+            uniform float uRoomProgress;
+            uniform float uTime;
+            uniform vec2 uResolution;
+            varying vec2 vUv;
+
+            float getLuma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+
+            void main() {
+                vec2 uv = vUv;
+                uv.x = 1.0 - uv.x; // Modo espejo
+
+                vec4 texColor = texture2D(tDiffuse, uv);
+                vec3 color = texColor.rgb;
+
+                vec2 texel = 1.0 / uResolution;
+                
+                // Sobel Edge Detection (Bordes crudos)
+                float s00 = getLuma(texture2D(tDiffuse, uv + texel * vec2(-1.0, -1.0)).rgb);
+                float s22 = getLuma(texture2D(tDiffuse, uv + texel * vec2(1.0, 1.0)).rgb);
+                float s02 = getLuma(texture2D(tDiffuse, uv + texel * vec2(-1.0, 1.0)).rgb);
+                float s20 = getLuma(texture2D(tDiffuse, uv + texel * vec2(1.0, -1.0)).rgb);
+                float rawEdge = abs(s00 - s22) + abs(s02 - s20);
+                
+                // Umbral limpio: Evita marcar texturas de piel suaves, solo bordes fuertes
+                float cleanEdge = smoothstep(0.15, 0.4, rawEdge);
+                
+                // Neural Grid Proporcional
+                vec2 aspectUv = uv;
+                aspectUv.x *= uResolution.x / uResolution.y;
+                vec2 gridUv = aspectUv * 120.0; 
+                vec2 cellCenter = fract(gridUv) - 0.5;
+                float dotGrid = 1.0 - step(0.1, length(cellCenter));
+
+                vec3 neonCyan = vec3(0.0, 1.0, 1.0);
+                
+                // 1. Tinte Envolvente (Luz Azul/Cyan Ambiental)
+                // Sumamos luz azul a tu color base multiplicándolo, creando un filtro envolvente
+                // sin transformar tu piel en azul puro.
+                vec3 roomLight = vec3(0.1, 0.4, 0.7); 
+                vec3 tintedColor = mix(color, (color * 0.7) + (roomLight * 0.5), 0.85);
+                
+                // 2. Neon Border Glow (Limpio y concentrado en la silueta)
+                vec3 edgeGlow = neonCyan * cleanEdge * 3.0;
+                
+                // 3. Grid Suave (Menos brillante para no distraer)
+                vec3 gridGlow = vec3(0.0, 0.5, 0.8) * dotGrid * 0.15;
+                
+                // Sumamos los brillos a la imagen base
+                vec3 arColor = tintedColor + edgeGlow + gridGlow;
+                
+                // Transición suave al abrir/cerrar el Room
+                color = mix(color, arColor, clamp(uRoomProgress, 0.0, 1.0));
+
+                gl_FragColor = vec4(color, 1.0);
+            }
+        `;
+
+        if (!videoTex) return null;
+
+        return (
+            <mesh renderOrder={-1} frustumCulled={false}>
+                <planeGeometry args={[2, 2]} />
+                <shaderMaterial 
+                    ref={materialRef}
+                    vertexShader={vertexShader}
+                    fragmentShader={fragmentShader}
+                    uniforms={uniforms}
+                    depthWrite={false}
+                    depthTest={false}
+                />
+            </mesh>
+        );
+    };
+
+    // ==========================================
+    // CÁLCULO EXACTO DEL ESPACIO
+    // ==========================================
+    const ViewportTracker = ({ viewportRef }) => {
+        const { viewport } = useThree();
+        useFrame(() => { viewportRef.current = viewport; });
         return null;
     };
 
     // ==========================================
-    // UI HOLOGRÁFICA (PUNTEROS) - RENDIMIENTO OPTIMIZADO
+    // UI HOLOGRÁFICA (PUNTEROS) - SMOOTH LERP
     // ==========================================
-    const HoloPointer = ({ positionRef, color, isTrackedRef, isPinchingRef }) => {
+    const HoloPointer = ({ positionRef, color, isTrackedRef, pinchType }) => {
         const ref = useRef();
-        const ringRef = useRef();
+        const currentPos = useRef(new THREE.Vector3());
 
-        useFrame((state) => {
+        useFrame((state, delta) => {
             if (!ref.current) return;
             const tracked = isTrackedRef.current;
             ref.current.visible = tracked;
-            
             if (!tracked) return;
             
-            ref.current.position.lerp(positionRef.current, 0.4);
-            if (ringRef.current) {
-                ringRef.current.rotation.x = state.clock.elapsedTime * 3;
-                ringRef.current.rotation.y = state.clock.elapsedTime * 2;
-                let scale = isPinchingRef.current ? 0.5 : 1.0;
-                ringRef.current.scale.lerp(new THREE.Vector3(scale, scale, scale), 0.2);
-            }
+            currentPos.current.lerp(positionRef.current, delta * 20.0);
+            ref.current.position.copy(currentPos.current);
+            
+            ref.current.rotation.x += delta * 3;
+            ref.current.rotation.y += delta * 2;
+            
+            let scale = pinchType ? 0.4 : 1.0;
+            ref.current.scale.lerp(new THREE.Vector3(scale, scale, scale), delta * 15.0);
         });
 
         return (
             <group ref={ref}>
                 <mesh>
                     <sphereGeometry args={[0.15, 16, 16]} />
-                    <meshBasicMaterial color={color} toneMapped={false} transparent opacity={0.8} />
+                    <meshBasicMaterial color={pinchType === 'pinky' ? '#ffffff' : color} toneMapped={false} transparent opacity={0.8} />
                 </mesh>
-                <mesh ref={ringRef}>
+                <mesh>
                     <torusGeometry args={[0.4, 0.02, 16, 32]} />
-                    <meshBasicMaterial color={color} toneMapped={false} transparent opacity={1} />
+                    <meshBasicMaterial color={pinchType === 'pinky' ? '#ffffff' : color} toneMapped={false} transparent opacity={1} />
                 </mesh>
             </group>
         );
     };
 
     // ==========================================
-    // COMPONENTE: FRUTA DEL DIABLO (CARGADOR GLB DINÁMICO)
+    // FRUTAS Y OBJETOS 3D
     // ==========================================
     const DevilFruit = ({ url, activePlanes, color, isHeartless, scale }) => {
         const { scene } = useGLTF(url);
         
-        // Clonamos la escena para tener mallas independientes y no afectar a las demás frutas
         const outerScene = useMemo(() => {
             const s = scene.clone(true);
-            s.traverse((child) => {
-                if (child.isMesh) {
-                    // Clonar el material es vital para que los cortes de una fruta no corten a otra igual
-                    child.material = child.material.clone();
-                }
-            });
+            s.traverse((child) => { if (child.isMesh) child.material = child.material.clone(); });
             return s;
         }, [scene]);
 
@@ -134,42 +252,25 @@
             s.traverse((child) => {
                 if (child.isMesh) {
                     child.material = new THREE.MeshStandardMaterial({
-                        color: color,
-                        emissive: color,
-                        emissiveIntensity: 4,
-                        toneMapped: false,
-                        side: THREE.BackSide
+                        color: color, emissive: color, emissiveIntensity: 4, toneMapped: false, side: THREE.BackSide
                     });
                 }
             });
             return s;
         }, [scene, color]);
 
-        // Aplicamos los planos de corte y el wireframe
         useEffect(() => {
             outerScene.traverse((child) => {
                 if (child.isMesh) {
                     if (isHeartless) {
-                        child.material = new THREE.MeshBasicMaterial({
-                            color: color,
-                            wireframe: true,
-                            transparent: true,
-                            opacity: 0.15,
-                            toneMapped: false,
-                            clippingPlanes: activePlanes
-                        });
+                        child.material = new THREE.MeshBasicMaterial({ color: color, wireframe: true, transparent: true, opacity: 0.15, toneMapped: false, clippingPlanes: activePlanes });
                     } else {
                         child.material.clippingPlanes = activePlanes;
                         child.material.side = THREE.FrontSide;
                     }
                 }
             });
-            
-            innerScene.traverse((child) => {
-                if (child.isMesh) {
-                    child.material.clippingPlanes = activePlanes;
-                }
-            });
+            innerScene.traverse((child) => { if (child.isMesh) child.material.clippingPlanes = activePlanes; });
         }, [outerScene, innerScene, activePlanes, isHeartless, color]);
 
         return (
@@ -180,39 +281,29 @@
         );
     };
 
-    // ==========================================
-    // ENTIDADES DESTRUCTIBLES (FÍSICAS PURAS EN GPU)
-    // ==========================================
     const DestructibleEntity = ({ data, appStateRef }) => {
         const ref = useRef();
         const targetGlowRef = useRef();
         const amputatePlane = useMemo(() => new THREE.Plane(), []);
-        const teleportKeyRef = useRef(0);
+        const currentPos = useRef(data.pos.clone());
 
-        useFrame((state) => {
+        useFrame((state, delta) => {
             if (!ref.current) return;
             
-            // Físicas: Teletransporte vs Arrastre
-            if (data.teleportKey && data.teleportKey !== teleportKeyRef.current) {
-                ref.current.position.copy(data.pos); // Salto instantáneo (Shambles)
-                teleportKeyRef.current = data.teleportKey;
-            } else {
-                ref.current.position.lerp(data.pos, 0.3); // Suavizado
-            }
-            ref.current.quaternion.slerp(data.rot, 0.3);
+            currentPos.current.lerp(data.pos, delta * 15.0);
+            ref.current.position.copy(currentPos.current);
+            ref.current.quaternion.slerp(data.rot, delta * 10.0);
 
-            // Glow Lógico independiente de React
             const isTargeted = appStateRef.current.targetIds.includes(data.id);
             if (targetGlowRef.current) {
                 targetGlowRef.current.visible = isTargeted;
                 if (isTargeted) {
-                    targetGlowRef.current.rotation.x = state.clock.elapsedTime * 0.5;
-                    targetGlowRef.current.rotation.y = state.clock.elapsedTime * 0.5;
-                    targetGlowRef.current.material.opacity = 0.5 + Math.sin(state.clock.elapsedTime * 8) * 0.3;
+                    targetGlowRef.current.rotation.x += delta * 0.5;
+                    targetGlowRef.current.rotation.y += delta * 0.5;
+                    targetGlowRef.current.material.opacity = 0.8 + Math.sin(state.clock.elapsedTime * 8) * 0.2;
                 }
             }
 
-            // Sincronización Matemática de Corte
             if (data.cutPlaneLocal) {
                 const matrix = new THREE.Matrix4().compose(ref.current.position, ref.current.quaternion, new THREE.Vector3(1,1,1));
                 amputatePlane.copy(data.cutPlaneLocal).applyMatrix4(matrix);
@@ -220,18 +311,17 @@
         });
 
         const activePlanes = data.cutPlaneLocal ? [amputatePlane] : [];
+        const boxGeo = useMemo(() => new THREE.BoxGeometry(1.6, 1.6, 1.6), []);
+        const edgesGeo = useMemo(() => new THREE.EdgesGeometry(boxGeo), [boxGeo]);
 
         return (
             <group ref={ref}>
-                {/* Target Glow Adaptativo */}
-                <mesh ref={targetGlowRef} scale={(data.scale || 1) * 1.5} visible={false}>
-                    <icosahedronGeometry args={[1, 1]} />
-                    <meshBasicMaterial color={BRAND.TARGET} wireframe transparent toneMapped={false} />
-                </mesh>
+                <lineSegments ref={targetGlowRef} scale={(data.scale || 1)} visible={false} geometry={edgesGeo}>
+                    <lineBasicMaterial color={BRAND.TARGET} linewidth={3} toneMapped={false} transparent opacity={0.8} />
+                </lineSegments>
 
-                {/* Renderizado Condicional: Núcleo (Mes) vs Frutas (GLB) */}
                 {data.type === 'heart_cube' ? (
-                    <group>
+                    <group scale={[0.8, 0.8, 0.8]}>
                         <mesh>
                             <boxGeometry args={[1.2, 1.2, 1.2]} />
                             <meshStandardMaterial color={data.color} emissive={data.color} emissiveIntensity={1} toneMapped={false} transparent opacity={0.9} />
@@ -251,119 +341,78 @@
     };
 
     // ==========================================
-    // DOMO INMERSIVO
-    // ==========================================
-    const SpatialRoom = ({ appStateRef }) => {
-        const ref = useRef();
-        useFrame((state) => {
-            if (ref.current) {
-                const targetScale = appStateRef.current.roomActive ? 1.0 : 0.01;
-                ref.current.scale.lerp(new THREE.Vector3(targetScale, targetScale, targetScale), 0.1);
-                ref.current.rotation.y = state.clock.elapsedTime * 0.02;
-                ref.current.rotation.x = state.clock.elapsedTime * 0.01;
-            }
-        });
-        return (
-            <mesh ref={ref}>
-                <sphereGeometry args={[60, 32, 32]} />
-                <meshBasicMaterial color={BRAND.CYAN} wireframe transparent opacity={0.05} toneMapped={false} side={THREE.BackSide} />
-            </mesh>
-        );
-    };
-
-    // ==========================================
-    // MOTOR PRINCIPAL
+    // MOTOR PRINCIPAL AR
     // ==========================================
     function App() {
         const videoRef = useRef(null);
-        const cameraRef = useRef(null);
-
-        // ESTADO MUTABLE (Lógica 60fps sin afectar a React)
-        const appState = useRef({
-            roomActive: false,
-            targetIds: [],
-        });
-        const pointers = useRef({
-            leftTracked: false, rightTracked: false,
-            rightPinching: false, leftPinching: false
-        });
         
-        // ESTADO REACTIVO (Sólo para actualizar el HUD de vez en cuando)
-        const [uiState, setUiState] = useState({
-            roomActive: false,
-            targetCount: 0,
-            debugLog: "SISTEMA INICIADO",
-            flash: false
-        });
+        const viewportRef = useRef({ width: 20, height: 15 });
+        const appState = useRef({ roomActive: false, targetIds: [] });
+        const pointers = useRef({ leftTracked: false, rightTracked: false, rightPinchType: null, leftPinchType: null });
+        
+        const [uiState, setUiState] = useState({ roomActive: false, targetCount: 0, debugLog: "SISTEMA AR LISTO", flash: false });
         const [isMenuOpen, setIsMenuOpen] = useState(false);
         const [, setRenderTick] = useState(0); 
 
         const leftPointerRef = useRef(new THREE.Vector3());
         const rightPointerRef = useRef(new THREE.Vector3());
         const prevGesturesLeft = useRef({});
-        const prevGesturesRight = useRef({});
 
-        // NOTA DE ESCALA: Ajusta la propiedad "scale" si los modelos GLB cargan muy grandes o muy pequeños.
+        const randomPos = () => new THREE.Vector3((Math.random() - 0.5) * 12, (Math.random() - 0.5) * 8 + 2, (Math.random() - 0.5) * 4 - 2);
+
         const entitiesRef = useRef([
-            { id: 'e1', type: 'gomu', url: 'https://static.wixstatic.com/3d/fe81a7_671d80a702e24ca28b2b3b3fe936de2f.glb', pos: new THREE.Vector3(-6, 0, 0), rot: new THREE.Quaternion(), state: 'intact', color: '#9900ff', scale: 2 },
-            { id: 'e2', type: 'ope',  url: 'https://static.wixstatic.com/3d/fe81a7_25ae6c9870b849de9299c8752be38376.glb', pos: new THREE.Vector3(0, 0, 0), rot: new THREE.Quaternion(), state: 'intact', color: '#ff0055', scale: 3.5 },
-            { id: 'e3', type: 'mera', url: 'https://static.wixstatic.com/3d/fe81a7_b0f4340e6ae6485fa974813fa445c6e6.glb', pos: new THREE.Vector3(6, 0, 0), rot: new THREE.Quaternion(), state: 'intact', color: '#ff5500', scale: 2.5 }
+            { id: 'e1', type: 'gomu', url: 'https://static.wixstatic.com/3d/fe81a7_671d80a702e24ca28b2b3b3fe936de2f.glb', pos: randomPos(), rot: new THREE.Quaternion(), state: 'intact', color: '#9900ff', scale: 1.0 },
+            { id: 'e2', type: 'ope',  url: 'https://static.wixstatic.com/3d/fe81a7_25ae6c9870b849de9299c8752be38376.glb', pos: randomPos(), rot: new THREE.Quaternion(), state: 'intact', color: '#ff0055', scale: 1.8 },
+            { id: 'e3', type: 'mera', url: 'https://static.wixstatic.com/3d/fe81a7_b0f4340e6ae6485fa974813fa445c6e6.glb', pos: randomPos(), rot: new THREE.Quaternion(), state: 'intact', color: '#ff5500', scale: 1.2 },
+            { id: 'e4', type: 'gomu', url: 'https://static.wixstatic.com/3d/fe81a7_671d80a702e24ca28b2b3b3fe936de2f.glb', pos: randomPos(), rot: new THREE.Quaternion(), state: 'intact', color: '#00ffff', scale: 1.0 }
         ]);
 
-        const timersRef = useRef({ fistHold: null, lastRoomToggle: 0 });
+        const timersRef = useRef({ lastRoomToggle: 0, lastAction: 0, lastTarget: 0, fistHold: null });
         const grabbedItemRef = useRef(null);
+        const grabOffsetRef = useRef(new THREE.Vector3());
 
-        // Actualizador de UI eficiente
         const dispatchUI = (logMsg, overrideFlash = false) => {
             setUiState(prev => ({
-                roomActive: appState.current.roomActive,
-                targetCount: appState.current.targetIds.length,
-                debugLog: logMsg || prev.debugLog,
-                flash: overrideFlash ? true : prev.flash
+                roomActive: appState.current.roomActive, targetCount: appState.current.targetIds.length, 
+                debugLog: logMsg || prev.debugLog, flash: overrideFlash ? true : prev.flash
             }));
-            if (overrideFlash) {
-                setTimeout(() => setUiState(prev => ({ ...prev, flash: false })), 300);
-            }
+            if (overrideFlash) setTimeout(() => setUiState(prev => ({ ...prev, flash: false })), 300);
         };
 
         const dist = (p1, p2) => Math.hypot(p1.x - p2.x, p1.y - p2.y, p1.z - p2.z);
 
-        // MAGIA 360º: Vector Relativo a la Cámara
         const getHandPos3D = (lm) => {
-            const rawVector = new THREE.Vector3((0.5 - lm.x) * 25, (0.5 - lm.y) * 25, -lm.z * 25);
-            if (cameraRef.current) {
-                // Al rotar la cámara, rotamos el vector. Así la mano siempre se alinea con la vista
-                rawVector.applyQuaternion(cameraRef.current.quaternion);
-            }
-            return rawVector;
+            const vW = viewportRef.current.width;
+            const vH = viewportRef.current.height;
+            return new THREE.Vector3((0.5 - lm.x) * vW, (0.5 - lm.y) * vH, -lm.z * 40);
         };
 
         const analyzeGestures = (landmarks) => {
             const wrist = landmarks[0];
-            const isExtended = (tip, pip) => dist(landmarks[tip], wrist) > dist(landmarks[pip], wrist) + 0.02;
+            const thumbTip = landmarks[4];
             
-            const index = isExtended(8, 6);
-            const middle = isExtended(12, 10);
-            const ring = isExtended(16, 14);
-            const pinky = isExtended(20, 18);
+            const isExtended = (tip, pip) => dist(landmarks[tip], wrist) > dist(landmarks[pip], wrist);
+            const indexExt = isExtended(8, 6);
+            const middleExt = isExtended(12, 10);
+            const ringExt = isExtended(16, 14);
+            const pinkyExt = isExtended(20, 18);
+
+            const closedFingersCount = (!indexExt?1:0) + (!middleExt?1:0) + (!ringExt?1:0) + (!pinkyExt?1:0);
+            const isFist = closedFingersCount === 4;
+
+            const isIndexPinch = dist(thumbTip, landmarks[8]) < 0.05 && dist(thumbTip, landmarks[12]) > 0.08 && !isFist;
+            const isPinkyPinch = dist(thumbTip, landmarks[20]) < 0.06 && dist(thumbTip, landmarks[8]) > 0.1 && !isFist;
+
+            const isPeace = indexExt && middleExt && !ringExt && !pinkyExt && !isIndexPinch;
 
             const v1 = new THREE.Vector3().subVectors(getHandPos3D(landmarks[5]), getHandPos3D(wrist));
             const v2 = new THREE.Vector3().subVectors(getHandPos3D(landmarks[17]), getHandPos3D(wrist));
             const normal = new THREE.Vector3().crossVectors(v2, v1).normalize(); 
-            const isPalmDown = normal.y < -0.2;
+            const isPalmDown = normal.y < -0.15;
 
-            const isIndexPinch = dist(landmarks[4], landmarks[8]) < 0.05;
-            const isPinkyPinch = dist(landmarks[4], landmarks[20]) < 0.05;
+            const isOpen = indexExt && middleExt && ringExt && pinkyExt;
 
-            return {
-                isFist: !index && !middle && !ring && !pinky,
-                isOpen: index && middle && ring && pinky,
-                isPalmDown: isPalmDown,
-                palmNormal: normal,
-                isIndexPinch: isIndexPinch && !isPinkyPinch,
-                isPinkyPinch: isPinkyPinch && !isIndexPinch,
-                isShambles: index && middle && !ring && !pinky && !isIndexPinch && !isPinkyPinch 
-            };
+            return { isPalmDown, palmNormal: normal, isIndexPinch, isPinkyPinch, isPeace, isOpen, isFist };
         };
 
         useEffect(() => {
@@ -378,7 +427,9 @@
                 });
 
                 if (navigator.mediaDevices) {
-                    const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
+                    const stream = await navigator.mediaDevices.getUserMedia({ 
+                        video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" } 
+                    });
                     videoRef.current.srcObject = stream;
                     videoRef.current.onloadedmetadata = () => videoRef.current.play();
                 }
@@ -388,6 +439,7 @@
             const processFrame = () => {
                 if (videoRef.current?.readyState >= 2 && landmarker) {
                     const results = landmarker.detectForVideo(videoRef.current, performance.now());
+                    const now = performance.now();
                     
                     if (results.landmarks && results.landmarks.length > 0) {
                         let leftHand = null, rightHand = null;
@@ -400,20 +452,14 @@
                         pointers.current.leftTracked = !!leftHand;
                         pointers.current.rightTracked = !!rightHand;
 
-                        let logUpdate = null;
-
-                        // ==========================================
-                        // MANO DERECHA (Mando y Telequinesis)
-                        // ==========================================
                         if (rightHand) {
                             const gestures = analyzeGestures(rightHand);
                             const rightPos = getHandPos3D(rightHand[9]);
                             const indexTip = getHandPos3D(rightHand[8]);
 
                             rightPointerRef.current.copy(indexTip);
-                            pointers.current.rightPinching = gestures.isIndexPinch;
+                            pointers.current.rightPinchType = gestures.isPinkyPinch ? 'pinky' : (gestures.isIndexPinch ? 'index' : null);
 
-                            // 1. GRAB TELEQUINESIS
                             if (gestures.isIndexPinch) {
                                 if (!grabbedItemRef.current) {
                                     let closest = null, minDist = Infinity;
@@ -421,112 +467,102 @@
                                         const d = indexTip.distanceTo(ent.pos);
                                         if (d < 6.0 && d < minDist) { minDist = d; closest = ent; }
                                     });
-                                    if (closest) grabbedItemRef.current = closest;
+                                    if (closest) {
+                                        grabbedItemRef.current = closest;
+                                        grabOffsetRef.current.subVectors(closest.pos, indexTip); 
+                                    }
                                 }
                                 if (grabbedItemRef.current) {
-                                    grabbedItemRef.current.pos.copy(rightPos); 
+                                    grabbedItemRef.current.pos.copy(indexTip).add(grabOffsetRef.current); 
                                 }
                             } else {
                                 grabbedItemRef.current = null;
                             }
 
-                            // 2. TARGET LOCK
-                            if (gestures.isPinkyPinch && !prevGesturesRight.current.isPinkyPinch) {
+                            if (gestures.isPinkyPinch && (now - timersRef.current.lastTarget > 1000)) {
                                 let closest = null, minDist = Infinity;
                                 entitiesRef.current.forEach(ent => {
-                                    const d = rightPos.distanceTo(ent.pos);
-                                    if (d < 15.0 && d < minDist) { minDist = d; closest = ent; }
+                                    const d = indexTip.distanceTo(ent.pos);
+                                    if (d < 10.0 && d < minDist) { minDist = d; closest = ent; }
                                 });
                                 
                                 if (closest) {
                                     if (appState.current.targetIds.includes(closest.id)) {
                                         appState.current.targetIds = appState.current.targetIds.filter(id => id !== closest.id);
-                                        logUpdate = `TARGET UNLOCKED: ${closest.type.toUpperCase()}`;
+                                        dispatchUI(`TARGET: DESACTIVADO`);
                                     } else {
                                         appState.current.targetIds.push(closest.id);
-                                        logUpdate = `TARGET LOCKED: ${closest.type.toUpperCase()}`;
+                                        dispatchUI(`TARGET: ENLAZADO`);
                                     }
-                                } else if (appState.current.targetIds.length > 0) {
-                                    appState.current.targetIds = [];
-                                    logUpdate = `TARGETS LIMPIADOS`;
+                                    timersRef.current.lastTarget = now;
                                 }
-                                dispatchUI(logUpdate);
                             }
-                            prevGesturesRight.current = gestures;
+                        } else {
+                            grabbedItemRef.current = null;
                         }
 
-                        // ==========================================
-                        // MANO IZQUIERDA (Ope Ope Poderes)
-                        // ==========================================
                         if (leftHand) {
                             const gestures = analyzeGestures(leftHand);
                             const leftPos = getHandPos3D(leftHand[9]);
                             leftPointerRef.current.copy(leftPos);
+                            pointers.current.leftPinchType = gestures.isPinkyPinch ? 'pinky' : (gestures.isIndexPinch ? 'index' : null);
 
-                            // ROOM TOGGLE
-                            if (gestures.isOpen && gestures.isPalmDown && !appState.current.roomActive) {
-                                if (performance.now() - timersRef.current.lastRoomToggle > 1000) {
+                            if (gestures.isOpen && gestures.isPalmDown) {
+                                if (!appState.current.roomActive && (now - timersRef.current.lastRoomToggle > 1500)) {
                                     appState.current.roomActive = true;
-                                    timersRef.current.lastRoomToggle = performance.now();
-                                    dispatchUI(`ROOM DOMAIN: ACTIVADO`);
+                                    timersRef.current.lastRoomToggle = now;
+                                    dispatchUI(`NEURAL ROOM: ON`);
                                 }
                             }
                             
                             if (gestures.isFist && appState.current.roomActive) {
-                                if (!timersRef.current.fistHold) timersRef.current.fistHold = performance.now();
-                                else if (performance.now() - timersRef.current.fistHold > 3000) { 
+                                if (!timersRef.current.fistHold) {
+                                    timersRef.current.fistHold = now; 
+                                } else if (now - timersRef.current.fistHold > 800) { 
                                     appState.current.roomActive = false;
                                     timersRef.current.fistHold = null;
-                                    timersRef.current.lastRoomToggle = performance.now();
-                                    dispatchUI(`ROOM DOMAIN: COLAPSADO`);
+                                    timersRef.current.lastRoomToggle = now;
+                                    dispatchUI(`NEURAL ROOM: OFF`);
                                 }
                             } else {
-                                timersRef.current.fistHold = null;
+                                timersRef.current.fistHold = null; 
                             }
 
-                            // PODERES DENTRO DE ROOM
-                            if (appState.current.roomActive && appState.current.targetIds.length > 0) {
+                            if (appState.current.roomActive && appState.current.targetIds.length > 0 && (now - timersRef.current.lastAction > 1000)) {
                                 
-                                // [A] AMPUTATE (Corte)
                                 if (gestures.isIndexPinch && !prevGesturesLeft.current.isIndexPinch) {
                                     let entitiesChanged = false;
                                     appState.current.targetIds.forEach(tId => {
                                         const target = entitiesRef.current.find(e => e.id === tId && !e.cutPlaneLocal && e.type !== 'heart_cube');
                                         if (target) {
-                                            target.state = 'halved';
-                                            
                                             const localNormal = gestures.palmNormal.clone().applyQuaternion(target.rot.clone().invert()).normalize();
                                             const localPlane = new THREE.Plane(localNormal, 0); 
-                                            
                                             target.cutPlaneLocal = localPlane;
                                             
                                             const inversePlane = localPlane.clone();
                                             inversePlane.normal.negate();
-
-                                            const offset = gestures.palmNormal.clone().multiplyScalar(0.8);
+                                            const offset = gestures.palmNormal.clone().multiplyScalar(1.5); 
                                             const newId = target.id + '_half';
                                             
                                             if (!entitiesRef.current.some(e => e.id === newId)) {
-                                                // INYECCIÓN DE URL Y ESCALA PARA QUE LA MITAD CLONADA SE RENDERICE CORRECTAMENTE
                                                 entitiesRef.current.push({
                                                     id: newId, type: target.type, url: target.url, scale: target.scale,
                                                     pos: target.pos.clone().add(offset), rot: target.rot.clone(), 
-                                                    state: 'halved', color: target.color,
-                                                    cutPlaneLocal: inversePlane, isHeartless: target.isHeartless
+                                                    state: 'halved', color: target.color, cutPlaneLocal: inversePlane, isHeartless: target.isHeartless
                                                 });
                                                 entitiesChanged = true;
                                             }
                                         }
                                     });
                                     if (entitiesChanged) {
-                                        dispatchUI(`AMPUTATE: SECCIONADO PERFECTO`);
-                                        setRenderTick(t => t + 1); // Montar nuevo Mesh
+                                        dispatchUI(`AMPUTATE: EJECUTADO`);
+                                        timersRef.current.lastAction = now;
+                                        setRenderTick(t => t + 1);
                                     }
                                 }
 
-                                // [B] MES (Extracción Núcleo)
                                 if (gestures.isPinkyPinch && !prevGesturesLeft.current.isPinkyPinch) {
-                                    let offsetZ = 2.0; 
+                                    let offsetZ = 2.5; 
                                     let entitiesChanged = false;
                                     appState.current.targetIds.forEach(tId => {
                                         const target = entitiesRef.current.find(e => e.id === tId && e.type !== 'heart_cube' && !e.isHeartless);
@@ -536,24 +572,24 @@
                                             
                                             if (!entitiesRef.current.some(e => e.id === newId)) {
                                                 entitiesRef.current.push({
-                                                    id: newId, type: 'heart_cube', 
+                                                    id: newId, type: 'heart_cube', scale: 0.8,
                                                     pos: target.pos.clone().add(new THREE.Vector3(0, 0, offsetZ)), 
                                                     rot: new THREE.Quaternion(), state: 'extracted', color: target.color
                                                 });
                                                 entitiesChanged = true;
                                             }
-                                            offsetZ += 1.5; 
+                                            offsetZ += 2.0; 
                                         }
                                     });
                                     if (entitiesChanged) {
-                                        dispatchUI(`MES: NÚCLEO EXTRAÍDO`);
-                                        setRenderTick(t => t + 1); // Montar nuevo Mesh
+                                        dispatchUI(`MES: EJECUTADO`);
+                                        timersRef.current.lastAction = now;
+                                        setRenderTick(t => t + 1);
                                     }
                                 }
 
-                                // [C] SHAMBLES (Swap)
-                                if (gestures.isShambles && !prevGesturesLeft.current.isShambles) {
-                                    if (appState.current.targetIds.length === 2) {
+                                if (gestures.isPeace && !prevGesturesLeft.current.isPeace) {
+                                    if (appState.current.targetIds.length >= 2) {
                                         const t1 = entitiesRef.current.find(e => e.id === appState.current.targetIds[0]);
                                         const t2 = entitiesRef.current.find(e => e.id === appState.current.targetIds[1]);
                                         
@@ -562,21 +598,22 @@
                                             t1.pos.copy(t2.pos);
                                             t2.pos.copy(tempPos);
                                             
-                                            t1.teleportKey = (t1.teleportKey || 0) + 1;
-                                            t2.teleportKey = (t2.teleportKey || 0) + 1;
-                                            
-                                            appState.current.targetIds = []; // Clear
-                                            dispatchUI(`SHAMBLES: SWAP COMPLETADO`, true); // True activa el Flash
+                                            appState.current.targetIds = []; 
+                                            dispatchUI(`SHAMBLES: COMPLETADO`, true); 
+                                            timersRef.current.lastAction = now;
                                         }
                                     }
                                 }
                             }
                             prevGesturesLeft.current = gestures;
+                        } else {
+                            timersRef.current.fistHold = null;
                         }
 
                     } else {
                         pointers.current.leftTracked = false;
                         pointers.current.rightTracked = false;
+                        timersRef.current.fistHold = null;
                     }
                 }
                 reqId = requestAnimationFrame(processFrame);
@@ -586,84 +623,72 @@
         }, []);
 
         return (
-            <div className={`relative w-full h-screen select-none bg-[#050505] ${uiState.flash ? 'flash-active' : ''}`}>
-                <video ref={videoRef} className="hidden" playsInline muted />
+            <div className={`relative w-full h-screen select-none bg-black overflow-hidden ${uiState.flash ? 'flash-active' : ''}`}>
+                <video ref={videoRef} className="fixed inset-0 w-full h-full object-cover -scale-x-100 opacity-0 pointer-events-none -z-10" playsInline muted />
                 
-                <div className="absolute inset-0 z-0">
-                    <Canvas gl={{ localClippingEnabled: true, antialias: false, toneMapping: THREE.NoToneMapping }}>
-                        <CameraTracker cameraRef={cameraRef} />
-                        
-                        <color attach="background" args={['#050505']} />
+                <div className="absolute inset-0 z-10 pointer-events-none">
+                    <Canvas gl={{ localClippingEnabled: true, antialias: true, toneMapping: THREE.NoToneMapping }}>
+                        <ViewportTracker viewportRef={viewportRef} />
                         <PerspectiveCamera makeDefault position={[0, 0, 24]} fov={45} />
-                        <OrbitControls makeDefault enableDamping dampingFactor={0.05} />
                         
-                        <ambientLight intensity={0.2} />
-                        <directionalLight position={[10, 20, 10]} intensity={.5} color="#ffffff" />
-                        <directionalLight position={[-10, -20, -10]} intensity={1} color={BRAND.CYAN} />
-                        
-                        <Grid infiniteGrid fadeDistance={40} fadeStrength={5} cellSize={1} sectionColor={BRAND.CYAN} cellColor="#111" position={[0, -6, 0]} />
+                        <ARBackground videoRef={videoRef} appStateRef={appState} />
 
-                        <SpatialRoom appStateRef={appState} />
+                        <ambientLight intensity={0.5} />
+                        <directionalLight position={[10, 20, 10]} intensity={0.7} color="#ffffff" />
+                        <directionalLight position={[-10, -20, -10]} intensity={1.5} color={BRAND.CYAN} />
                         
-                        <HoloPointer positionRef={leftPointerRef} color={BRAND.CYAN} isTrackedRef={{current: pointers.current.leftTracked}} isPinchingRef={{current: false}} />
-                        <HoloPointer positionRef={rightPointerRef} color={BRAND.MAGENTA} isTrackedRef={{current: pointers.current.rightTracked}} isPinchingRef={{current: pointers.current.rightPinching}} />
+                        <HoloPointer positionRef={leftPointerRef} color={BRAND.CYAN} isTrackedRef={{current: pointers.current.leftTracked}} pinchType={pointers.current.leftPinchType} />
+                        <HoloPointer positionRef={rightPointerRef} color={BRAND.MAGENTA} isTrackedRef={{current: pointers.current.rightTracked}} pinchType={pointers.current.rightPinchType} />
                         
                         {entitiesRef.current.map(ent => (
                             <DestructibleEntity key={ent.id} data={ent} appStateRef={appState} />
                         ))}
-
-                        <EffectComposer disableNormalPass>
-                            <Bloom luminanceThreshold={.5} intensity={.25} mipmapBlur />
-                            <ChromaticAberration offset={new THREE.Vector2(0.001, 0.001)} />
-                            <Vignette eskil={false} offset={0.1} darkness={1} />
-                        </EffectComposer>
                     </Canvas>
                 </div>
 
-                {/* HUD LOG (Top) */}
                 <div className="absolute top-6 left-6 z-20 pointer-events-none">
                     <div className="flex items-center gap-3 bg-black/60 backdrop-blur-md p-3 border-l-4 border-l-[#00ffff] rounded-r-xl shadow-2xl">
                         <Activity className="text-[#00ffff] w-5 h-5 animate-pulse" />
                         <div>
-                            <h1 className="text-lg font-black uppercase leading-none tracking-tighter">Ope Ope <span className="text-[#00ffff]">Visualizer</span></h1>
+                            <h1 className="text-lg font-black uppercase leading-none tracking-tighter">SGX Ope <span className="text-[#00ffff]">Ope Room</span></h1>
                             <p className="text-[9px] text-[#00ffff] font-bold uppercase tracking-[0.2em]">{uiState.debugLog}</p>
                         </div>
                     </div>
                 </div>
 
-                {/* HUD STATUS & MENU COMPACTO (Bottom) */}
                 <div className="absolute bottom-6 left-6 z-20 flex flex-col gap-2">
                     <div className="flex gap-2 pointer-events-none">
-                        <div className={`px-3 py-1.5 text-[10px] font-black uppercase tracking-widest rounded-lg border w-fit backdrop-blur-md transition-colors ${uiState.roomActive ? 'bg-cyan-900/30 border-cyan-400 text-cyan-400' : 'bg-black/30 border-white/10 text-neutral-500'}`}>
-                            Room: {uiState.roomActive ? 'ON' : 'OFF'}
+                        <div className={`px-3 py-1.5 text-[10px] font-black uppercase tracking-widest rounded-lg border w-fit backdrop-blur-md transition-colors ${uiState.roomActive ? 'bg-cyan-900/40 border-cyan-400 text-cyan-400 shadow-[0_0_15px_rgba(0,255,255,0.3)]' : 'bg-black/40 border-white/20 text-neutral-400'}`}>
+                            Room: {uiState.roomActive ? 'ENVUELTO' : 'OFF'}
                         </div>
-                        <div className={`px-3 py-1.5 text-[10px] font-black uppercase tracking-widest rounded-lg border w-fit backdrop-blur-md flex items-center gap-2 transition-colors ${uiState.targetCount > 0 ? 'bg-[#ff0055]/20 border-[#ff0055] text-[#ff0055]' : 'bg-black/30 border-white/10 text-neutral-500'}`}>
-                            <Layers className="w-3.5 h-3.5"/> Targets: {uiState.targetCount}
+                        <div className={`px-3 py-1.5 text-[10px] font-black uppercase tracking-widest rounded-lg border w-fit backdrop-blur-md flex items-center gap-2 transition-colors ${uiState.targetCount > 0 ? 'bg-cyan-900/40 border-cyan-400 text-cyan-400 shadow-[0_0_15px_rgba(0,255,255,0.3)]' : 'bg-black/40 border-white/20 text-neutral-400'}`}>
+                            <Crosshair className="w-3.5 h-3.5"/> Targets: {uiState.targetCount}
                         </div>
                     </div>
                     
                     <button 
                         onClick={() => setIsMenuOpen(!isMenuOpen)}
-                        className="flex items-center justify-between gap-2 bg-black/80 backdrop-blur-md border border-white/20 rounded-xl px-4 py-2 text-xs font-black uppercase tracking-widest text-white shadow-xl hover:bg-white/10 transition-colors w-fit"
+                        className="flex items-center justify-between gap-2 bg-black/80 backdrop-blur-md border border-white/20 rounded-xl px-4 py-2 text-xs font-black uppercase tracking-widest text-white shadow-xl hover:bg-white/10 transition-colors w-fit pointer-events-auto"
                     >
-                        <span><Scissors className="inline w-3.5 h-3.5 mr-2 text-cyan-400"/> Guía de Operaciones</span>
+                        <span><Scissors className="inline w-3.5 h-3.5 mr-2 text-cyan-400"/> Operaciones</span>
                         {isMenuOpen ? <ChevronDown className="w-4 h-4"/> : <ChevronUp className="w-4 h-4"/>}
                     </button>
 
                     {isMenuOpen && (
-                        <div className="bg-black/80 backdrop-blur-md border border-white/10 rounded-xl p-4 text-[10px] uppercase tracking-widest text-neutral-300 w-80 shadow-2xl origin-bottom animate-in fade-in slide-in-from-bottom-2">
+                        <div className="bg-black/80 backdrop-blur-md border border-white/10 rounded-xl p-4 text-[10px] uppercase tracking-widest text-neutral-300 w-80 shadow-2xl origin-bottom animate-in fade-in slide-in-from-bottom-2 pointer-events-auto">
                             <div className="grid grid-cols-2 gap-4">
                                 <ul className="space-y-2">
-                                    <li className="text-magenta-400 font-bold border-b border-white/10 pb-1 mb-1">Mano Derecha (Mando)</li>
-                                    <li><span className="text-white">Pinch Índice:</span> Mover 360º</li>
-                                    <li><span className="text-white">Pinch Meñique:</span> Fijar/Soltar Target</li>
+                                    <li className="text-magenta-400 font-bold border-b border-white/10 pb-1 mb-1">Mano Derecha (Control)</li>
+                                    <li><span className="text-white">Pellizco Índice:</span> Mover Libremente</li>
+                                    <li><span className="text-white">Pellizco Meñique:</span> Fijar Target</li>
                                 </ul>
                                 <ul className="space-y-2">
-                                    <li className="text-cyan-400 font-bold border-b border-white/10 pb-1 mb-1">Mano Izquierda (Poder)</li>
-                                    <li><span className="text-white">Palma Abajo:</span> Activar Room</li>
-                                    <li><span className="text-white">Pinch Índice:</span> Amputate (Corte Perfecto)</li>
-                                    <li><span className="text-white">Pinch Meñique:</span> Mes (Extraer Núcleo)</li>
-                                    <li><span className="text-white">2 Dedos:</span> Shambles (Swap)</li>
+                                    <li className="text-cyan-400 font-bold border-b border-white/10 pb-1 mb-1">Mano Izq. (Poderes)</li>
+                                    <li><span className="text-white">Palma Abajo:</span> Activar Neural Room</li>
+                                    <li><span className="text-white">Puño Cerrado:</span> Sostener 1s para Apagar</li>
+                                    <li><span className="text-white">Pellizco Índice:</span> Amputate (Corte)</li>
+                                    <li><span className="text-white">Pellizco Meñique:</span> Mes (Núcleo)</li>
+                                    <li><span className="text-white">Símbolo Paz (V):</span> Shambles</li>
                                 </ul>
                             </div>
                         </div>
